@@ -147,9 +147,16 @@ jobs:
             "${API_ROOT}/pulls" \
             -d "${CREATE_BODY}")
 
-          if [ "${HTTP_CODE}" = "201" ] || [ "${HTTP_CODE}" = "422" ]; then
+          if [ "${HTTP_CODE}" = "201" ]; then
             cat /tmp/flathub-pr-response.json
             exit 0
+          fi
+
+          if [ "${HTTP_CODE}" = "422" ]; then
+            if grep -q "A pull request already exists" /tmp/flathub-pr-response.json; then
+              cat /tmp/flathub-pr-response.json
+              exit 0
+            fi
           fi
 
           echo "Failed to create Flathub PR (HTTP ${HTTP_CODE})"
