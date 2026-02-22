@@ -73,7 +73,13 @@ jobs:
           cd /tmp/flathub-fork
 
           BRANCH="update-${APP_ID}-${RELEASE_TAG}"
-          git checkout -B "${BRANCH}" "origin/${FLATHUB_BASE_BRANCH}"
+          TARGET_BASE="${FLATHUB_BASE_BRANCH}"
+          if ! git rev-parse --verify --quiet "origin/${TARGET_BASE}" >/dev/null; then
+            echo "origin/${TARGET_BASE} not found in fork, falling back to origin/master"
+            TARGET_BASE="master"
+          fi
+          echo "TARGET_BASE=${TARGET_BASE}" >> "$GITHUB_ENV"
+          git checkout -B "${BRANCH}" "origin/${TARGET_BASE}"
 
           mkdir -p "${APP_ID}"
           cp /tmp/flathub-payload/${APP_ID}.json "${APP_ID}/${APP_ID}.json"
@@ -117,7 +123,7 @@ jobs:
 
           gh pr create \
             --repo "${FLATHUB_REPO}" \
-            --base "${FLATHUB_BASE_BRANCH}" \
+            --base "${TARGET_BASE}" \
             --head "${FLATHUB_FORK_OWNER}:${BRANCH}" \
             --title "${APP_ID}: update ${RELEASE_TAG}" \
             --body "Automated update from ${GITHUB_REPOSITORY} for ${RELEASE_TAG}.\n\n- App ID: ${APP_ID}\n- Source commit: ${SOURCE_COMMIT}\n- Includes updated manifest and cargo-sources.json"
