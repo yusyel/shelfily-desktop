@@ -19,11 +19,10 @@
   <url type="homepage">https://github.com/yusyel/shelfily-desktop</url>
   <url type="vcs-browser">https://github.com/yusyel/shelfily-desktop</url>
   <url type="bugtracker">https://github.com/yusyel/shelfily-desktop/issues</url>
-  <icon type="remote">https://raw.githubusercontent.com/yusyel/shelfily-desktop/main/icon.png</icon>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/yusyel/shelfily-desktop/main/sc.png</image>
       <caption>Shelfily Desktop main library view</caption>
+      <image type="source">https://raw.githubusercontent.com/yusyel/shelfily-desktop/main/sc.png</image>
     </screenshot>
   </screenshots>
 
