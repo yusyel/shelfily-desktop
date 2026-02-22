@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.yusyel.ShelfilyDesktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Shelfily Desktop</name>
+  <summary>Modern Audiobookshelf desktop client</summary>
+  <description>
+    <p>
+      Shelfily Desktop is a GTK4/libadwaita client for Audiobookshelf.
+      It provides login, library browsing, item details, and audio playback in a native Linux desktop interface.
+    </p>
+  </description>
+
+  <developer id="io.github.yusyel">
+    <name>yusuf</name>
+  </developer>
+
+  <url type="homepage">https://github.com/yusyel/shelfily-desktop</url>
+  <url type="vcs-browser">https://github.com/yusyel/shelfily-desktop</url>
+  <url type="bugtracker">https://github.com/yusyel/shelfily-desktop/issues</url>
+
+  <translation type="gettext">shelfily-desktop</translation>
+  <launchable type="desktop-id">io.github.yusyel.ShelfilyDesktop.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-02-22"/>
+  </releases>
+</component>

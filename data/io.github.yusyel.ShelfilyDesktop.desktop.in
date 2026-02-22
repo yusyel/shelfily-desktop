@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Shelfily Desktop
+Exec=shelfily-desktop
+Icon=io.github.yusyel.ShelfilyDesktop
+Terminal=false
+Type=Application
+Categories=AudioVideo;Network;
+Keywords=audiobooks;audiobookshelf;books;player;
+StartupNotify=true
+DBusActivatable=true

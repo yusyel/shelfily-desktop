@@ -1,0 +1,6 @@
+# List of source files containing translatable strings.
+# Please keep this file sorted alphabetically.
+data/io.github.yusyel.ShelfilyDesktop.desktop.in
+data/io.github.yusyel.ShelfilyDesktop.metainfo.xml.in
+data/io.github.yusyel.ShelfilyDesktop.gschema.xml
+src/window.ui

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="shelfily-desktop">
+	<schema id="io.github.yusyel.ShelfilyDesktop" path="/io/github/yusyel/ShelfilyDesktop/">
+		<key name="server-url" type="s">
+			<default>''</default>
+			<summary>Server URL</summary>
+		</key>
+		<key name="library-id" type="s">
+			<default>''</default>
+			<summary>Default library ID</summary>
+		</key>
+	</schema>
+</schemalist>
