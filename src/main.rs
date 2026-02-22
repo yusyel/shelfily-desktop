@@ -29,7 +29,7 @@ fn main() -> glib::ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Initialize GStreamer
-    gstreamer::init().expect("GStreamer başlatılamadı");
+    gstreamer::init().expect("Failed to initialize GStreamer");
 
     // Set up gettext translations
     bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR).expect("Unable to bind the text domain");
@@ -42,7 +42,7 @@ fn main() -> glib::ExitCode {
     match gio::Resource::load(&resource_path) {
         Ok(resources) => gio::resources_register(&resources),
         Err(_) => log::warn!(
-            "Kaynaklar yüklenemedi ({}), geliştirme modunda çalışıyor",
+            "Failed to load resources ({}), running in development mode",
             resource_path
         ),
     }

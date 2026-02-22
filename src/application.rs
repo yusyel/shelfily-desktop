@@ -93,7 +93,7 @@ impl ShelfilyDesktopApplication {
             .copyright("© 2026 yusuf")
             .license_type(gtk::License::Gpl30)
             .website("https://github.com/yusyel/shelfily-desktop")
-            .comments("Audiobookshelf için modern GTK4/libadwaita istemcisi")
+            .comments("Modern GTK4/libadwaita client for Audiobookshelf")
             .build();
 
         about.present(Some(&window));

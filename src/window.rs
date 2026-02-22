@@ -189,7 +189,7 @@ impl ShelfilyDesktopWindow {
             Ok(Some(token)) => token.to_string(),
             Ok(None) => String::new(),
             Err(err) => {
-                log::warn!("Token libsecret'ten okunamadı: {}", err);
+                log::warn!("Failed to read token from libsecret: {}", err);
                 String::new()
             }
         }
@@ -446,7 +446,7 @@ impl ShelfilyDesktopWindow {
             return;
         }
 
-        log::info!("Kayıtlı oturum bulundu, giriş deneniyor...");
+        log::info!("Found saved session, trying login...");
         let imp = self.imp();
         imp.client.set_server(&server_url);
         imp.client.set_token(&token);
@@ -465,12 +465,12 @@ impl ShelfilyDesktopWindow {
             });
             match rx.recv().await {
                 Ok(Ok(_)) => {
-                    log::info!("Kayıtlı oturum geçerli, kütüphaneye gidiliyor");
+                    log::info!("Saved session is valid, loading library");
                     win.imp().stack.set_visible_child_name("library");
                     win.load_library();
                 }
                 _ => {
-                    log::warn!("Kayıtlı oturum geçersiz, giriş ekranı gösteriliyor");
+                    log::warn!("Saved session is invalid, showing login screen");
                     win.clear_stored_session();
                 }
             }
@@ -994,7 +994,7 @@ impl ShelfilyDesktopWindow {
 
                 if let Some(token) = extract_access_token(&uri_str) {
                     token_found_c.set(true);
-                    log::info!("OAuth token alındı");
+                    log::info!("OAuth token received");
                     dlg.close();
                     win.on_login_success(&srv, &token, "");
                 }
@@ -1106,7 +1106,7 @@ impl ShelfilyDesktopWindow {
             view_stack.add_titled(&continue_scrolled, Some("continue"), "Continue");
         continue_page.set_icon_name(Some("media-playback-start-symbolic"));
 
-        // Tab 2: Tüm Kitaplar
+        // Tab 2: All Books
         let library_scrolled = gtk::ScrolledWindow::new();
         library_scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
         library_scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
@@ -1215,20 +1215,20 @@ impl ShelfilyDesktopWindow {
 
             match rx.recv().await {
                 Ok(Ok((lib_id, items))) => {
-                    log::info!("Kütüphane yüklendi: {} kitap", items.len());
+                    log::info!("Library loaded: {} books", items.len());
                     *win.imp().library_id.borrow_mut() = lib_id;
                     win.populate_library(&items);
                     win.set_library_loading(false);
                 }
                 Ok(Err(e)) => {
-                    log::error!("Kütüphane yüklenemedi: {}", e);
+                    log::error!("Failed to load library: {}", e);
                     win.set_library_loading(false);
-                    win.show_library_error(&format!("Kütüphane yüklenemedi: {}", e));
+                    win.show_library_error(&format!("Failed to load library: {}", e));
                 }
                 Err(_) => {
-                    log::error!("Kütüphane yüklenirken kanal hatası");
+                    log::error!("Channel error while loading library");
                     win.set_library_loading(false);
-                    win.show_library_error("Bağlantı hatası");
+                    win.show_library_error("Connection error");
                 }
             }
         });
@@ -1300,10 +1300,10 @@ impl ShelfilyDesktopWindow {
                     }
                 }
                 Ok(Err(e)) => {
-                    log::warn!("Devam eden kitaplar yüklenemedi: {}", e);
+                    log::warn!("Failed to load continue listening books: {}", e);
                 }
                 Err(_) => {
-                    log::warn!("Devam eden kitaplar kanal hatası");
+                    log::warn!("Channel error while loading continue listening books");
                 }
             }
         });
@@ -1515,10 +1515,10 @@ impl ShelfilyDesktopWindow {
                     win.populate_detail(&item);
                 }
                 Ok(Err(e)) => {
-                    log::error!("Kitap yüklenemedi: {}", e);
+                    log::error!("Failed to load book: {}", e);
                 }
                 Err(_) => {
-                    log::error!("Kanal hatası");
+                    log::error!("Channel error");
                 }
             }
         });
@@ -1822,7 +1822,7 @@ impl ShelfilyDesktopWindow {
             match rx.recv().await {
                 Ok(Ok(session)) => {
                     log::info!(
-                        "Oynatma oturumu başladı: {} — {}",
+                        "Playback session started: {} - {}",
                         session.display_title.as_deref().unwrap_or(""),
                         session.id
                     );
@@ -1877,10 +1877,10 @@ impl ShelfilyDesktopWindow {
                     win.start_sync_timer();
                 }
                 Ok(Err(e)) => {
-                    log::error!("Oynatma başlatılamadı: {}", e);
+                    log::error!("Failed to start playback: {}", e);
                 }
                 Err(_) => {
-                    log::error!("Kanal hatası");
+                    log::error!("Channel error");
                 }
             }
         });
@@ -1936,17 +1936,17 @@ impl ShelfilyDesktopWindow {
         let stream_url = match stream_url {
             Some(url) => url,
             None => {
-                log::error!("Ses akışı URL'si bulunamadı");
+                log::error!("Audio stream URL not found");
                 return;
             }
         };
 
-        log::info!("Ses akışı başlatılıyor: {}", stream_url);
+        log::info!("Starting audio stream: {}", stream_url);
 
         let playbin = gstreamer::ElementFactory::make("playbin3")
             .property("uri", &stream_url)
             .build()
-            .expect("playbin3 oluşturulamadı");
+            .expect("Failed to create playbin3");
 
         // Buffering configuration
         if playbin.find_property("buffer-duration").is_some() {
@@ -1985,7 +1985,7 @@ impl ShelfilyDesktopWindow {
                                             | gstreamer::SeekFlags::KEY_UNIT,
                                         clock_pos,
                                     );
-                                    log::info!("Pozisyona atlandı: {:.0}s", pos);
+                                    log::info!("Seeked to position: {:.0}s", pos);
                                 }
                                 let _ = pipeline.set_state(gstreamer::State::Playing);
                                 is_playing.set(true);
@@ -2014,11 +2014,11 @@ impl ShelfilyDesktopWindow {
                         glib::ControlFlow::Continue
                     }
                     MessageView::Error(err) => {
-                        log::error!("GStreamer hatası: {} — {:?}", err.error(), err.debug());
+                        log::error!("GStreamer error: {} - {:?}", err.error(), err.debug());
                         glib::ControlFlow::Break
                     }
                     MessageView::Eos(_) => {
-                        log::info!("Ses akışı sona erdi");
+                        log::info!("Audio stream ended");
                         is_playing.set(false);
                         if let Some(win) = win_weak.upgrade() {
                             win.update_play_pause_icon(false);
@@ -2094,7 +2094,7 @@ impl ShelfilyDesktopWindow {
                         log::debug!("Oturum senkronize edildi: {:.0}s", current)
                     }
                     Err(e) => {
-                        log::warn!("Senkronizasyon hatası: {}", e)
+                        log::warn!("Sync error: {}", e)
                     }
                 });
             }
