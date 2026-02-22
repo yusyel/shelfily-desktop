@@ -1,0 +1,30 @@
+name: Flatpak CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-flatpak:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
+      options: --privileged
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: flatpak/io.github.yusyel.ShelfilyDesktop.Devel.json
+          bundle: shelfily-desktop-devel.flatpak
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: true
