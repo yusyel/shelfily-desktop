@@ -73,13 +73,9 @@ jobs:
           cd /tmp/flathub-fork
 
           BRANCH="update-${APP_ID}-${RELEASE_TAG}"
-          TARGET_BASE="${FLATHUB_BASE_BRANCH}"
-          if ! git rev-parse --verify --quiet "origin/${TARGET_BASE}" >/dev/null; then
-            echo "origin/${TARGET_BASE} not found in fork, falling back to origin/master"
-            TARGET_BASE="master"
-          fi
-          echo "TARGET_BASE=${TARGET_BASE}" >> "$GITHUB_ENV"
-          git checkout -B "${BRANCH}" "origin/${TARGET_BASE}"
+          git remote add upstream "https://github.com/${FLATHUB_REPO}.git"
+          git fetch --depth=1 upstream "${FLATHUB_BASE_BRANCH}"
+          git checkout -B "${BRANCH}" FETCH_HEAD
 
           mkdir -p "${APP_ID}"
           cp /tmp/flathub-payload/${APP_ID}.json "${APP_ID}/${APP_ID}.json"
