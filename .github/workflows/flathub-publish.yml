@@ -105,22 +105,53 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXISTING_PR=$(gh pr list \
-            --repo "${FLATHUB_REPO}" \
-            --head "${FLATHUB_FORK_OWNER}:${BRANCH}" \
-            --state all \
-            --json number \
-            --jq '.[0].number')
+          API_ROOT="https://api.github.com/repos/${FLATHUB_REPO}"
+          HEAD_REF="${FLATHUB_FORK_OWNER}:${BRANCH}"
 
-          if [ -n "${EXISTING_PR}" ]; then
-            echo "Flathub PR already exists: #${EXISTING_PR}"
-            gh pr reopen "${EXISTING_PR}" --repo "${FLATHUB_REPO}" || true
+          EXISTING_JSON=$(curl -sS --fail-with-body \
+            -H "Authorization: token ${GH_TOKEN}" \
+            --get "${API_ROOT}/pulls" \
+            --data-urlencode "state=all" \
+            --data-urlencode "head=${HEAD_REF}")
+
+          PR_NUMBER=$(python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "[]"); print(d[0]["number"] if d else "")' <<< "${EXISTING_JSON}")
+          PR_STATE=$(python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "[]"); print(d[0]["state"] if d else "")' <<< "${EXISTING_JSON}")
+
+          if [ -n "${PR_NUMBER}" ]; then
+            echo "Flathub PR already exists: #${PR_NUMBER} (${PR_STATE})"
+            if [ "${PR_STATE}" = "closed" ]; then
+              curl -sS --fail-with-body \
+                -X PATCH \
+                -H "Authorization: token ${GH_TOKEN}" \
+                -H "Content-Type: application/json" \
+                "${API_ROOT}/pulls/${PR_NUMBER}" \
+                -d '{"state":"open"}' >/dev/null || true
+            fi
             exit 0
           fi
 
-          gh pr create \
-            --repo "${FLATHUB_REPO}" \
-            --base "${FLATHUB_BASE_BRANCH}" \
-            --head "${FLATHUB_FORK_OWNER}:${BRANCH}" \
-            --title "${APP_ID}: update ${RELEASE_TAG}" \
-            --body "Automated update from ${GITHUB_REPOSITORY} for ${RELEASE_TAG}.\n\n- App ID: ${APP_ID}\n- Source commit: ${SOURCE_COMMIT}\n- Includes updated manifest and cargo-sources.json"
+          CREATE_BODY=$(cat <<EOF
+          {
+            "title": "${APP_ID}: update ${RELEASE_TAG}",
+            "head": "${HEAD_REF}",
+            "base": "${FLATHUB_BASE_BRANCH}",
+            "body": "Automated update from ${GITHUB_REPOSITORY} for ${RELEASE_TAG}.\n\n- App ID: ${APP_ID}\n- Source commit: ${SOURCE_COMMIT}\n- Includes updated manifest and cargo-sources.json"
+          }
+          EOF
+          )
+
+          HTTP_CODE=$(curl -sS -o /tmp/flathub-pr-response.json -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${API_ROOT}/pulls" \
+            -d "${CREATE_BODY}")
+
+          if [ "${HTTP_CODE}" = "201" ] || [ "${HTTP_CODE}" = "422" ]; then
+            cat /tmp/flathub-pr-response.json
+            exit 0
+          fi
+
+          echo "Failed to create Flathub PR (HTTP ${HTTP_CODE})"
+          cat /tmp/flathub-pr-response.json
+          exit 1
