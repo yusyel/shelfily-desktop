@@ -56,4 +56,4 @@ Workflow: `.github/workflows/flathub-publish.yml`
 - Requires:
   - Secret `FLATHUB_GITHUB_TOKEN`
   - Variable `FLATHUB_FORK_OWNER`
-  - Optional variable `FLATHUB_BASE_BRANCH` (default `master`)
+  - Optional variable `FLATHUB_BASE_BRANCH` (default `new-pr`)

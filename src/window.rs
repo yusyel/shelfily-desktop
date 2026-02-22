@@ -14,7 +14,8 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::rc::Rc;
 use webkit6::prelude::WebViewExt;
@@ -26,6 +27,13 @@ use crate::models::*;
 struct StoredSession {
     server_url: String,
     library_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibrarySortMode {
+    NewlyAdded,
+    AuthorAsc,
+    TitleAsc,
 }
 
 mod imp {
@@ -41,6 +49,10 @@ mod imp {
         pub library_id: RefCell<String>,
         pub continue_flowbox: RefCell<Option<gtk::FlowBox>>,
         pub library_switcher_bar: RefCell<Option<adw::ViewSwitcherBar>>,
+        pub library_items: RefCell<Vec<LibraryItem>>,
+        pub continue_items: RefCell<Vec<LibraryItem>>,
+        pub library_sort_mode: Cell<LibrarySortMode>,
+        pub library_search_query: RefCell<String>,
         // Detail
         pub detail_content: RefCell<Option<gtk::Box>>,
         pub detail_top_box: RefCell<Option<gtk::Box>>,
@@ -91,6 +103,10 @@ mod imp {
                 library_id: RefCell::new(String::new()),
                 continue_flowbox: RefCell::new(None),
                 library_switcher_bar: RefCell::new(None),
+                library_items: RefCell::new(Vec::new()),
+                continue_items: RefCell::new(Vec::new()),
+                library_sort_mode: Cell::new(LibrarySortMode::NewlyAdded),
+                library_search_query: RefCell::new(String::new()),
                 detail_content: RefCell::new(None),
                 detail_top_box: RefCell::new(None),
                 detail_cover_image: RefCell::new(None),
@@ -1061,7 +1077,75 @@ impl ShelfilyDesktopWindow {
         refresh_btn.connect_clicked(move |_| {
             win.load_library();
         });
-        header.pack_end(&refresh_btn);
+
+        let sort_btn = gtk::MenuButton::new();
+        sort_btn.set_icon_name("view-sort-ascending-symbolic");
+        sort_btn.set_tooltip_text(Some("Sort All Books"));
+        sort_btn.add_css_class("flat");
+
+        let sort_popover = gtk::Popover::new();
+        let sort_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        sort_box.set_margin_top(8);
+        sort_box.set_margin_bottom(8);
+        sort_box.set_margin_start(8);
+        sort_box.set_margin_end(8);
+
+        let sort_new_btn = gtk::Button::with_label("Newly Added");
+        sort_new_btn.add_css_class("flat");
+        let win = self.clone();
+        sort_new_btn.connect_clicked(move |_| {
+            win.imp().library_sort_mode.set(LibrarySortMode::NewlyAdded);
+            win.render_library();
+            win.render_continue_listening();
+        });
+        sort_box.append(&sort_new_btn);
+
+        let sort_author_btn = gtk::Button::with_label("Author (A-Z)");
+        sort_author_btn.add_css_class("flat");
+        let win = self.clone();
+        sort_author_btn.connect_clicked(move |_| {
+            win.imp().library_sort_mode.set(LibrarySortMode::AuthorAsc);
+            win.render_library();
+            win.render_continue_listening();
+        });
+        sort_box.append(&sort_author_btn);
+
+        let sort_title_btn = gtk::Button::with_label("Title (A-Z)");
+        sort_title_btn.add_css_class("flat");
+        let win = self.clone();
+        sort_title_btn.connect_clicked(move |_| {
+            win.imp().library_sort_mode.set(LibrarySortMode::TitleAsc);
+            win.render_library();
+            win.render_continue_listening();
+        });
+        sort_box.append(&sort_title_btn);
+
+        sort_popover.set_child(Some(&sort_box));
+        sort_btn.set_popover(Some(&sort_popover));
+
+        let search_btn = gtk::MenuButton::new();
+        search_btn.set_icon_name("system-search-symbolic");
+        search_btn.set_tooltip_text(Some("Search in All Books"));
+        search_btn.add_css_class("flat");
+
+        let search_popover = gtk::Popover::new();
+        let search_popover_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        search_popover_box.set_margin_top(8);
+        search_popover_box.set_margin_bottom(8);
+        search_popover_box.set_margin_start(8);
+        search_popover_box.set_margin_end(8);
+        let search_entry = gtk::SearchEntry::new();
+        search_entry.set_placeholder_text(Some("Search books or authors"));
+        search_entry.set_hexpand(true);
+        let win = self.clone();
+        search_entry.connect_search_changed(move |entry| {
+            *win.imp().library_search_query.borrow_mut() = entry.text().to_string();
+            win.render_library();
+            win.render_continue_listening();
+        });
+        search_popover_box.append(&search_entry);
+        search_popover.set_child(Some(&search_popover_box));
+        search_btn.set_popover(Some(&search_popover));
 
         let menu_button = gtk::MenuButton::new();
         menu_button.set_primary(true);
@@ -1073,7 +1157,12 @@ impl ShelfilyDesktopWindow {
         menu.append(Some("Log Out"), Some("app.logout"));
         menu.append(Some("Quit"), Some("app.quit"));
         menu_button.set_menu_model(Some(&menu));
+
+        // Right-side order: hamburger (far right), search, sort, refresh.
         header.pack_end(&menu_button);
+        header.pack_end(&search_btn);
+        header.pack_end(&sort_btn);
+        header.pack_end(&refresh_btn);
 
         // ── ViewStack with two tabs ──
         let view_stack = adw::ViewStack::new();
@@ -1118,6 +1207,8 @@ impl ShelfilyDesktopWindow {
         library_clamp.set_margin_start(16);
         library_clamp.set_margin_end(16);
 
+        let all_books_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+
         let flowbox = gtk::FlowBox::new();
         flowbox.set_valign(gtk::Align::Start);
         flowbox.set_max_children_per_line(6);
@@ -1127,7 +1218,8 @@ impl ShelfilyDesktopWindow {
         flowbox.set_homogeneous(true);
         flowbox.set_selection_mode(gtk::SelectionMode::None);
 
-        library_clamp.set_child(Some(&flowbox));
+        all_books_box.append(&flowbox);
+        library_clamp.set_child(Some(&all_books_box));
         library_scrolled.set_child(Some(&library_clamp));
 
         let library_page = view_stack.add_titled(&library_scrolled, Some("all"), "All Books");
@@ -1242,6 +1334,25 @@ impl ShelfilyDesktopWindow {
     }
 
     fn populate_library(&self, items: &[LibraryItem]) {
+        let mut seen = HashSet::new();
+        let deduped: Vec<LibraryItem> = items
+            .iter()
+            .filter(|item| seen.insert(item.id.clone()))
+            .cloned()
+            .collect();
+
+        let mut cached = self.imp().library_items.borrow_mut();
+        cached.clear();
+        cached.extend(deduped);
+        drop(cached);
+
+        self.render_library();
+
+        // Fetch "Continue" items from the server
+        self.load_continue_listening();
+    }
+
+    fn render_library(&self) {
         let imp = self.imp();
         let flowbox = imp.library_flowbox.borrow();
         let flowbox = flowbox.as_ref().unwrap();
@@ -1250,13 +1361,75 @@ impl ShelfilyDesktopWindow {
             flowbox.remove(&child);
         }
 
-        for item in items {
+        let mut items = imp.library_items.borrow().clone();
+        match imp.library_sort_mode.get() {
+            LibrarySortMode::NewlyAdded => {
+                items.sort_by_key(|item| Reverse(Self::item_added_timestamp(item)));
+            }
+            LibrarySortMode::AuthorAsc => {
+                items.sort_by_key(|item| {
+                    (
+                        Self::item_author_for_sort(item).to_lowercase(),
+                        Self::item_title_for_sort(item).to_lowercase(),
+                    )
+                });
+            }
+            LibrarySortMode::TitleAsc => {
+                items.sort_by_key(|item| {
+                    (
+                        Self::item_title_for_sort(item).to_lowercase(),
+                        Self::item_author_for_sort(item).to_lowercase(),
+                    )
+                });
+            }
+        }
+
+        let query = imp.library_search_query.borrow().trim().to_lowercase();
+        if !query.is_empty() {
+            items.retain(|item| {
+                let title = Self::item_title_for_sort(item).to_lowercase();
+                let author = Self::item_author_for_sort(item).to_lowercase();
+                title.contains(&query) || author.contains(&query)
+            });
+        }
+
+        for item in &items {
             let card = self.create_book_card(item);
             flowbox.append(&card);
         }
+    }
 
-        // Fetch "Continue" items from the server
-        self.load_continue_listening();
+    fn item_title_for_sort(item: &LibraryItem) -> &str {
+        item.media
+            .as_ref()
+            .and_then(|m| m.metadata.as_ref())
+            .and_then(|md| md.title.as_deref())
+            .unwrap_or("")
+    }
+
+    fn item_author_for_sort(item: &LibraryItem) -> &str {
+        item.media
+            .as_ref()
+            .and_then(|m| m.metadata.as_ref())
+            .and_then(|md| md.author_name_lf.as_deref().or(md.author_name.as_deref()))
+            .unwrap_or("")
+    }
+
+    fn item_added_timestamp(item: &LibraryItem) -> u64 {
+        item.extra
+            .as_ref()
+            .and_then(|v| v.get("addedAt").and_then(|x| x.as_u64()))
+            .or_else(|| {
+                item.extra
+                    .as_ref()
+                    .and_then(|v| v.get("createdAt").and_then(|x| x.as_u64()))
+            })
+            .or_else(|| {
+                item.extra
+                    .as_ref()
+                    .and_then(|v| v.get("updatedAt").and_then(|x| x.as_u64()))
+            })
+            .unwrap_or(0)
     }
 
     fn load_continue_listening(&self) {
@@ -1271,33 +1444,17 @@ impl ShelfilyDesktopWindow {
                 let _ = tx.send_blocking(result);
             });
 
-            let continue_flowbox = win.imp().continue_flowbox.borrow();
-            let continue_flowbox = continue_flowbox.as_ref().unwrap();
-            while let Some(child) = continue_flowbox.first_child() {
-                continue_flowbox.remove(&child);
-            }
-
             match rx.recv().await {
                 Ok(Ok(items)) => {
                     log::info!("Devam eden kitaplar: {}", items.len());
-                    for item in &items {
-                        let card = win.create_book_card(item);
-                        continue_flowbox.append(&card);
-                    }
-                    if items.is_empty() {
-                        let empty_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-                        empty_box.set_valign(gtk::Align::Center);
-                        empty_box.set_halign(gtk::Align::Center);
-                        empty_box.set_vexpand(true);
-                        let icon = gtk::Image::from_icon_name("audio-headphones-symbolic");
-                        icon.set_pixel_size(48);
-                        icon.add_css_class("dim-label");
-                        empty_box.append(&icon);
-                        let label = gtk::Label::new(Some("No books in progress yet"));
-                        label.add_css_class("dim-label");
-                        empty_box.append(&label);
-                        continue_flowbox.append(&empty_box);
-                    }
+                    let mut seen = HashSet::new();
+                    let deduped: Vec<LibraryItem> = items
+                        .iter()
+                        .filter(|item| seen.insert(item.id.clone()))
+                        .cloned()
+                        .collect();
+                    *win.imp().continue_items.borrow_mut() = deduped;
+                    win.render_continue_listening();
                 }
                 Ok(Err(e)) => {
                     log::warn!("Failed to load continue listening books: {}", e);
@@ -1307,6 +1464,67 @@ impl ShelfilyDesktopWindow {
                 }
             }
         });
+    }
+
+    fn render_continue_listening(&self) {
+        let imp = self.imp();
+        let continue_flowbox = imp.continue_flowbox.borrow();
+        let continue_flowbox = continue_flowbox.as_ref().unwrap();
+        while let Some(child) = continue_flowbox.first_child() {
+            continue_flowbox.remove(&child);
+        }
+
+        let mut items = imp.continue_items.borrow().clone();
+        match imp.library_sort_mode.get() {
+            LibrarySortMode::NewlyAdded => {
+                items.sort_by_key(|item| Reverse(Self::item_added_timestamp(item)));
+            }
+            LibrarySortMode::AuthorAsc => {
+                items.sort_by_key(|item| {
+                    (
+                        Self::item_author_for_sort(item).to_lowercase(),
+                        Self::item_title_for_sort(item).to_lowercase(),
+                    )
+                });
+            }
+            LibrarySortMode::TitleAsc => {
+                items.sort_by_key(|item| {
+                    (
+                        Self::item_title_for_sort(item).to_lowercase(),
+                        Self::item_author_for_sort(item).to_lowercase(),
+                    )
+                });
+            }
+        }
+
+        let query = imp.library_search_query.borrow().trim().to_lowercase();
+        if !query.is_empty() {
+            items.retain(|item| {
+                let title = Self::item_title_for_sort(item).to_lowercase();
+                let author = Self::item_author_for_sort(item).to_lowercase();
+                title.contains(&query) || author.contains(&query)
+            });
+        }
+
+        for item in &items {
+            let card = self.create_book_card(item);
+            continue_flowbox.append(&card);
+        }
+
+        if items.is_empty() {
+            let empty_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+            empty_box.set_valign(gtk::Align::Center);
+            empty_box.set_halign(gtk::Align::Center);
+            empty_box.set_vexpand(true);
+            let icon = gtk::Image::from_icon_name("audio-headphones-symbolic");
+            icon.set_pixel_size(48);
+            icon.add_css_class("dim-label");
+            empty_box.append(&icon);
+            let label = gtk::Label::new(Some("No books in progress yet"));
+            label.add_css_class("dim-label");
+            empty_box.append(&label);
+            continue_flowbox.append(&empty_box);
+        }
     }
 
     fn create_book_card(&self, item: &LibraryItem) -> gtk::Widget {

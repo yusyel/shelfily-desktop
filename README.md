@@ -44,7 +44,7 @@ Configure these in this GitHub repository:
 - Variable: `FLATHUB_FORK_OWNER`
   - Your GitHub username/org that owns the fork.
 - Optional variable: `FLATHUB_BASE_BRANCH`
-  - Defaults to `master`.
+  - Defaults to `new-pr`.
 
 ## Flathub manifest prep in this repo
 
