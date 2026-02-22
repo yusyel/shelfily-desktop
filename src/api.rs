@@ -345,7 +345,18 @@ impl AudiobookshelfClient {
     pub fn audio_stream_url(&self, content_url: &str) -> String {
         let inner = self.inner.lock().unwrap();
         let token = inner.token.as_deref().unwrap_or("");
-        format!("{}{}?token={}", inner.base_url, content_url, token)
+        let base = if content_url.starts_with("http://") || content_url.starts_with("https://") {
+            content_url.to_string()
+        } else {
+            format!("{}{}", inner.base_url, content_url)
+        };
+
+        if token.is_empty() {
+            return base;
+        }
+
+        let separator = if base.contains('?') { '&' } else { '?' };
+        format!("{base}{separator}token={token}")
     }
 
     /// Generic GET request

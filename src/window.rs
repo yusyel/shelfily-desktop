@@ -27,6 +27,8 @@ use crate::models::*;
 struct StoredSession {
     server_url: String,
     library_id: String,
+    #[serde(default)]
+    token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +259,7 @@ impl ShelfilyDesktopWindow {
             let session = StoredSession {
                 server_url: settings.string("server-url").to_string(),
                 library_id: settings.string("library-id").to_string(),
+                token: String::new(),
             };
             if !session.server_url.is_empty() {
                 return session;
@@ -444,18 +447,27 @@ impl ShelfilyDesktopWindow {
 
     fn save_credentials(&self) {
         let imp = self.imp();
+        let token = imp.client.token().unwrap_or_default();
         self.write_stored_session(&StoredSession {
             server_url: imp.client.server_url(),
             library_id: imp.library_id.borrow().clone(),
+            token: token.clone(),
         });
-        self.store_secret_token(&imp.client.token().unwrap_or_default());
+        self.store_secret_token(&token);
         log::info!("Oturum bilgileri kaydedildi");
     }
 
     fn try_restore_session(&self) {
         let saved = self.read_stored_session();
         let server_url = saved.server_url;
-        let token = self.lookup_secret_token();
+        let token = {
+            let secret_token = self.lookup_secret_token();
+            if secret_token.is_empty() {
+                saved.token
+            } else {
+                secret_token
+            }
+        };
         let library_id = saved.library_id;
 
         if server_url.is_empty() || token.is_empty() {
@@ -2164,7 +2176,12 @@ impl ShelfilyDesktopWindow {
         let playbin = gstreamer::ElementFactory::make("playbin3")
             .property("uri", &stream_url)
             .build()
-            .expect("Failed to create playbin3");
+            .or_else(|_| {
+                gstreamer::ElementFactory::make("playbin")
+                    .property("uri", &stream_url)
+                    .build()
+            })
+            .expect("Failed to create playbin");
 
         // Buffering configuration
         if playbin.find_property("buffer-duration").is_some() {
@@ -2204,12 +2221,6 @@ impl ShelfilyDesktopWindow {
                                         clock_pos,
                                     );
                                     log::info!("Seeked to position: {:.0}s", pos);
-                                }
-                                let _ = pipeline.set_state(gstreamer::State::Playing);
-                                is_playing.set(true);
-                                if let Some(win) = win_weak.upgrade() {
-                                    win.update_play_pause_icon(true);
-                                    win.refresh_detail_play_button();
                                 }
                             }
                         }
@@ -2251,7 +2262,10 @@ impl ShelfilyDesktopWindow {
 
         *imp.bus_guard.borrow_mut() = Some(guard);
 
-        let _ = playbin.set_state(gstreamer::State::Paused);
+        let _ = playbin.set_state(gstreamer::State::Playing);
+        imp.is_playing.set(true);
+        self.update_play_pause_icon(true);
+        self.refresh_detail_play_button();
         *imp.pipeline.borrow_mut() = Some(playbin);
     }
 
