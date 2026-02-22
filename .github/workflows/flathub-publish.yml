@@ -108,12 +108,13 @@ jobs:
           EXISTING_PR=$(gh pr list \
             --repo "${FLATHUB_REPO}" \
             --head "${FLATHUB_FORK_OWNER}:${BRANCH}" \
-            --state open \
+            --state all \
             --json number \
             --jq '.[0].number')
 
           if [ -n "${EXISTING_PR}" ]; then
-            echo "Flathub PR already open: #${EXISTING_PR}"
+            echo "Flathub PR already exists: #${EXISTING_PR}"
+            gh pr reopen "${EXISTING_PR}" --repo "${FLATHUB_REPO}" || true
             exit 0
           fi
 
