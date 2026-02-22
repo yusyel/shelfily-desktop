@@ -123,7 +123,7 @@ jobs:
 
           gh pr create \
             --repo "${FLATHUB_REPO}" \
-            --base "${TARGET_BASE}" \
+            --base "${FLATHUB_BASE_BRANCH}" \
             --head "${FLATHUB_FORK_OWNER}:${BRANCH}" \
             --title "${APP_ID}: update ${RELEASE_TAG}" \
             --body "Automated update from ${GITHUB_REPOSITORY} for ${RELEASE_TAG}.\n\n- App ID: ${APP_ID}\n- Source commit: ${SOURCE_COMMIT}\n- Includes updated manifest and cargo-sources.json"
