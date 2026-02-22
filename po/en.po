@@ -1,5 +1,5 @@
 # English translations for shelfily-desktop package.
-# Copyright (C) 2026 yusuf
+# Copyright (C) 2026 yusyel
 # This file is distributed under the same license as the shelfily-desktop package.
 #
 msgid ""
@@ -8,7 +8,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-02-22 00:00+0000\n"
 "PO-Revision-Date: 2026-02-22 00:00+0000\n"
-"Last-Translator: yusuf <>\n"
+"Last-Translator: yusyel <>\n"
 "Language-Team: English\n"
 "Language: en\n"
 "MIME-Version: 1.0\n"
