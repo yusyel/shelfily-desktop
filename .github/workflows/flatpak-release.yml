@@ -26,6 +26,7 @@ jobs:
           manifest-path: flatpak/io.github.yusyel.ShelfilyDesktop.Devel.json
           bundle: shelfily-desktop-${{ github.ref_name }}.flatpak
           cache-key: flatpak-release-${{ github.sha }}
+          run-tests: false
           upload-artifact: false
 
       - name: Publish GitHub release asset

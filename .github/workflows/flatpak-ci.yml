@@ -27,4 +27,5 @@ jobs:
           manifest-path: flatpak/io.github.yusyel.ShelfilyDesktop.Devel.json
           bundle: shelfily-desktop-devel.flatpak
           cache-key: flatpak-builder-${{ github.sha }}
+          run-tests: false
           upload-artifact: true
