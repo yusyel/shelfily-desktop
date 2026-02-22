@@ -2,6 +2,14 @@
 
 Desktop client for Shelfily.
 
+## Icon
+
+![Shelfily Desktop Icon](./icon.png)
+
+## Screenshot
+
+![Shelfily Desktop Screenshot](./sc.png)
+
 ## Flatpak CI/CD
 
 This repository includes two GitHub Actions workflows:
