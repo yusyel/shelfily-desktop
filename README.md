@@ -16,6 +16,12 @@ This repository includes two GitHub Actions workflows:
 - Builds a release `.flatpak` bundle.
 - Uploads the bundle as an asset to the matching GitHub Release.
 
+3. `.github/workflows/flathub-publish.yml`
+- Runs on tags like `v0.1.0` (and manually via workflow dispatch).
+- Syncs `flatpak/io.github.yusyel.ShelfilyDesktop.json` and `flatpak/cargo-sources.json`
+  into your Flathub fork branch.
+- Opens (or reuses) a PR to `flathub/flathub`.
+
 ## Flathub publishing flow
 
 GitHub CI/CD builds and releases Flatpak artifacts, but Flathub publishing is done through the Flathub packaging repository and PR review process.
@@ -28,3 +34,27 @@ git push origin v0.1.0
 2. Wait for `Flatpak Release` workflow to produce the `.flatpak` release asset.
 3. Submit/update your app manifest in Flathub (new app request or update PR).
 4. After Flathub review/merge, the app is published on Flathub.
+
+### Required repository settings for Flathub automation
+
+Configure these in this GitHub repository:
+
+- Secret: `FLATHUB_GITHUB_TOKEN`
+  - GitHub token that can push to your fork of `flathub/flathub` and create PRs.
+- Variable: `FLATHUB_FORK_OWNER`
+  - Your GitHub username/org that owns the fork.
+- Optional variable: `FLATHUB_BASE_BRANCH`
+  - Defaults to `master`.
+
+## Flathub manifest prep in this repo
+
+The Flathub-ready manifest and vendored Rust dependency source list live under:
+
+- `flatpak/io.github.yusyel.ShelfilyDesktop.json`
+- `flatpak/cargo-sources.json`
+
+Regenerate `flatpak/cargo-sources.json` whenever `Cargo.lock` changes:
+
+```bash
+./flatpak/update-cargo-sources.sh
+```

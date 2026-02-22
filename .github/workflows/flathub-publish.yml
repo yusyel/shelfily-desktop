@@ -1,0 +1,131 @@
+name: Flathub Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag for PR title/body (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: read
+
+jobs:
+  publish-to-flathub:
+    runs-on: ubuntu-latest
+    env:
+      APP_ID: io.github.yusyel.ShelfilyDesktop
+      FLATHUB_REPO: flathub/flathub
+      FLATHUB_FORK_OWNER: ${{ vars.FLATHUB_FORK_OWNER }}
+      FLATHUB_BASE_BRANCH: ${{ vars.FLATHUB_BASE_BRANCH || 'master' }}
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.release_tag }}
+      SOURCE_COMMIT: ${{ github.sha }}
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+
+      - name: Validate required files
+        run: |
+          set -euo pipefail
+          test -f flatpak/${APP_ID}.json
+          test -f flatpak/cargo-sources.json
+
+      - name: Ensure Flathub fork configuration
+        run: |
+          set -euo pipefail
+          if [ -z "${FLATHUB_FORK_OWNER}" ]; then
+            echo "Repository variable FLATHUB_FORK_OWNER is required (example: yusyel)."
+            exit 1
+          fi
+
+      - name: Prepare Flathub manifest payload
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/flathub-payload
+          cp flatpak/${APP_ID}.json /tmp/flathub-payload/${APP_ID}.json
+          cp flatpak/cargo-sources.json /tmp/flathub-payload/cargo-sources.json
+
+          python3 - <<'PY'
+          import json
+          path = '/tmp/flathub-payload/io.github.yusyel.ShelfilyDesktop.json'
+          with open(path, 'r', encoding='utf-8') as f:
+              data = json.load(f)
+          data['modules'][0]['sources'][0]['commit'] = '${{ github.sha }}'
+          with open(path, 'w', encoding='utf-8') as f:
+              json.dump(data, f, indent=4)
+              f.write('\n')
+          PY
+
+      - name: Clone Flathub fork
+        env:
+          GH_TOKEN: ${{ secrets.FLATHUB_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "Repository secret FLATHUB_GITHUB_TOKEN is required."
+            exit 1
+          fi
+
+          git clone https://x-access-token:${GH_TOKEN}@github.com/${FLATHUB_FORK_OWNER}/flathub.git /tmp/flathub-fork
+
+      - name: Commit and push Flathub update branch
+        env:
+          GH_TOKEN: ${{ secrets.FLATHUB_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd /tmp/flathub-fork
+
+          BRANCH="update-${APP_ID}-${RELEASE_TAG}"
+          git checkout -B "${BRANCH}" "origin/${FLATHUB_BASE_BRANCH}"
+
+          mkdir -p "${APP_ID}"
+          cp /tmp/flathub-payload/${APP_ID}.json "${APP_ID}/${APP_ID}.json"
+          cp /tmp/flathub-payload/cargo-sources.json "${APP_ID}/cargo-sources.json"
+
+          git add "${APP_ID}/${APP_ID}.json" "${APP_ID}/cargo-sources.json"
+
+          if git diff --cached --quiet; then
+            echo "No changes to publish to Flathub."
+            echo "NO_CHANGES=true" >> "$GITHUB_ENV"
+            echo "BRANCH=${BRANCH}" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "${APP_ID}: update for ${RELEASE_TAG}"
+          git push --force origin "${BRANCH}"
+
+          echo "NO_CHANGES=false" >> "$GITHUB_ENV"
+          echo "BRANCH=${BRANCH}" >> "$GITHUB_ENV"
+
+      - name: Open or reuse Flathub PR
+        if: env.NO_CHANGES == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.FLATHUB_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          EXISTING_PR=$(gh pr list \
+            --repo "${FLATHUB_REPO}" \
+            --head "${FLATHUB_FORK_OWNER}:${BRANCH}" \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+
+          if [ -n "${EXISTING_PR}" ]; then
+            echo "Flathub PR already open: #${EXISTING_PR}"
+            exit 0
+          fi
+
+          gh pr create \
+            --repo "${FLATHUB_REPO}" \
+            --base "${FLATHUB_BASE_BRANCH}" \
+            --head "${FLATHUB_FORK_OWNER}:${BRANCH}" \
+            --title "${APP_ID}: update ${RELEASE_TAG}" \
+            --body "Automated update from ${GITHUB_REPOSITORY} for ${RELEASE_TAG}.\n\n- App ID: ${APP_ID}\n- Source commit: ${SOURCE_COMMIT}\n- Includes updated manifest and cargo-sources.json"
