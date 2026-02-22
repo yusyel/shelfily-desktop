@@ -254,26 +254,27 @@ impl ShelfilyDesktopWindow {
     }
 
     fn read_stored_session(&self) -> StoredSession {
-        if Self::has_gsettings_schema() {
-            let settings = gio::Settings::new("io.github.yusyel.ShelfilyDesktop");
-            let session = StoredSession {
-                server_url: settings.string("server-url").to_string(),
-                library_id: settings.string("library-id").to_string(),
-                token: String::new(),
-            };
-            if !session.server_url.is_empty() {
-                return session;
-            }
-        }
-
+        let mut session = StoredSession::default();
         let path = Self::session_file_path();
         if let Ok(content) = fs::read_to_string(path) {
-            if let Ok(session) = serde_json::from_str::<StoredSession>(&content) {
-                return session;
+            if let Ok(file_session) = serde_json::from_str::<StoredSession>(&content) {
+                session = file_session;
             }
         }
 
-        StoredSession::default()
+        if Self::has_gsettings_schema() {
+            let settings = gio::Settings::new("io.github.yusyel.ShelfilyDesktop");
+            let server_url = settings.string("server-url").to_string();
+            let library_id = settings.string("library-id").to_string();
+            if !server_url.is_empty() {
+                session.server_url = server_url;
+            }
+            if !library_id.is_empty() {
+                session.library_id = library_id;
+            }
+        }
+
+        session
     }
 
     fn clear_stored_session(&self) {
@@ -290,6 +291,7 @@ impl ShelfilyDesktopWindow {
 
     fn setup_ui(&self) {
         self.set_title(Some("Shelfily Desktop"));
+        self.set_icon_name(Some("io.github.yusyel.ShelfilyDesktop"));
         self.set_default_width(1000);
         self.set_default_height(700);
         self.set_size_request(360, 540);

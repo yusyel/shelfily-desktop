@@ -86,7 +86,7 @@ impl ShelfilyDesktopApplication {
 
         let about = adw::AboutDialog::builder()
             .application_name("Shelfily Desktop")
-            .application_icon("audio-headphones-symbolic")
+            .application_icon("io.github.yusyel.ShelfilyDesktop")
             .developer_name("yusyel")
             .version(VERSION)
             .developers(vec!["yusyel"])
