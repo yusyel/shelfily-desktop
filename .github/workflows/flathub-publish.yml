@@ -21,7 +21,7 @@ jobs:
       APP_ID: io.github.yusyel.ShelfilyDesktop
       FLATHUB_REPO: flathub/flathub
       FLATHUB_FORK_OWNER: ${{ vars.FLATHUB_FORK_OWNER || github.repository_owner }}
-      FLATHUB_BASE_BRANCH: ${{ vars.FLATHUB_BASE_BRANCH || 'master' }}
+      FLATHUB_BASE_BRANCH: ${{ vars.FLATHUB_BASE_BRANCH || 'new-pr' }}
       RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.release_tag }}
       SOURCE_COMMIT: ${{ github.sha }}
 
