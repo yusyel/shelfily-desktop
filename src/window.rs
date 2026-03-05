@@ -499,9 +499,12 @@ impl ShelfilyDesktopWindow {
                     win.imp().stack.set_visible_child_name("library");
                     win.load_library();
                 }
-                _ => {
-                    log::warn!("Saved session is invalid, showing login screen");
+                Ok(Err(crate::api::ApiError::Auth(e))) => {
+                    log::warn!("Saved token is invalid ({}), clearing credentials", e);
                     win.clear_stored_session();
+                }
+                _ => {
+                    log::warn!("Could not reach server, keeping saved credentials");
                 }
             }
         });

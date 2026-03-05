@@ -368,11 +368,14 @@ impl AudiobookshelfClient {
             req = req.header("Authorization", format!("Bearer {}", t));
         }
         let resp = req.send().map_err(|e| ApiError::Network(e.to_string()))?;
-        if resp.status().is_success() {
+        let status = resp.status();
+        if status.is_success() {
             let body: T = resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
             Ok(body)
+        } else if status.as_u16() == 401 || status.as_u16() == 403 {
+            Err(ApiError::Auth(format!("HTTP {}", status)))
         } else {
-            Err(ApiError::Server(format!("HTTP {}", resp.status())))
+            Err(ApiError::Server(format!("HTTP {}", status)))
         }
     }
 
