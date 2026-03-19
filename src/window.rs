@@ -487,10 +487,15 @@ impl ShelfilyDesktopWindow {
         // Verify the token is still valid by trying a simple API call
         let client = imp.client.clone();
         let win = self.clone();
+        let saved_library_id = imp.library_id.borrow().clone();
         glib::spawn_future_local(async move {
             let (tx, rx) = async_channel::bounded(1);
             std::thread::spawn(move || {
-                let result = client.get_libraries();
+                let result = if saved_library_id.is_empty() {
+                    client.get_libraries().map(|_| ())
+                } else {
+                    client.get_library_items(&saved_library_id).map(|_| ())
+                };
                 let _ = tx.send_blocking(result);
             });
             match rx.recv().await {
@@ -565,8 +570,7 @@ impl ShelfilyDesktopWindow {
         imp.play_pause_btn.add_css_class("suggested-action");
         imp.play_pause_btn.set_width_request(40);
         imp.play_pause_btn.set_height_request(40);
-        imp.play_pause_btn
-            .set_tooltip_text(Some("Play / Pause"));
+        imp.play_pause_btn.set_tooltip_text(Some("Play / Pause"));
         let win = self.clone();
         imp.play_pause_btn.connect_clicked(move |_| {
             win.toggle_play_pause();
@@ -1208,8 +1212,7 @@ impl ShelfilyDesktopWindow {
         continue_clamp.set_child(Some(&continue_flowbox));
         continue_scrolled.set_child(Some(&continue_clamp));
 
-        let continue_page =
-            view_stack.add_titled(&continue_scrolled, Some("continue"), "Continue");
+        let continue_page = view_stack.add_titled(&continue_scrolled, Some("continue"), "Continue");
         continue_page.set_icon_name(Some("media-playback-start-symbolic"));
 
         // Tab 2: All Books
@@ -1326,6 +1329,9 @@ impl ShelfilyDesktopWindow {
                 Ok(Ok((lib_id, items))) => {
                     log::info!("Library loaded: {} books", items.len());
                     *win.imp().library_id.borrow_mut() = lib_id;
+                    if win.imp().client.is_authenticated() {
+                        win.save_credentials();
+                    }
                     win.populate_library(&items);
                     win.set_library_loading(false);
                 }
@@ -2074,10 +2080,7 @@ impl ShelfilyDesktopWindow {
 
                     // Update player bar info
                     win.update_player_info(
-                        session
-                            .display_title
-                            .as_deref()
-                            .unwrap_or("Unknown Book"),
+                        session.display_title.as_deref().unwrap_or("Unknown Book"),
                         session.display_author.as_deref().unwrap_or(""),
                         session_duration,
                         session_current,
