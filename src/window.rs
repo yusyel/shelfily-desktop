@@ -23,10 +23,12 @@ use webkit6::prelude::WebViewExt;
 use crate::api::AudiobookshelfClient;
 use crate::models::*;
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredSession {
     server_url: String,
     library_id: String,
+    #[serde(default)]
+    token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,9 +197,9 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         attrs
     }
 
-    fn store_secret_token(&self, token: &str) {
+    fn store_secret_token(&self, token: &str) -> bool {
         let schema = Self::secret_schema();
-        if let Err(err) = libsecret::password_store_sync(
+        match libsecret::password_store_sync(
             Some(&schema),
             Self::secret_attrs(),
             Some(libsecret::COLLECTION_DEFAULT.as_str()),
@@ -205,7 +207,11 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             token,
             gio::Cancellable::NONE,
         ) {
-            Self::log_secret_service_error("store", &err);
+            Ok(_) => true,
+            Err(err) => {
+                Self::log_secret_service_error("store", &err);
+                false
+            }
         }
     }
 
@@ -323,13 +329,19 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         imp.stack.set_transition_duration(200);
 
         let login_page = self.build_login_page();
+        let loading_page = self.build_loading_page();
         let library_page = self.build_library_page();
         let detail_page = self.build_detail_page();
 
         imp.stack.add_named(&login_page, Some("login"));
+        imp.stack.add_named(&loading_page, Some("loading"));
         imp.stack.add_named(&library_page, Some("library"));
         imp.stack.add_named(&detail_page, Some("detail"));
-        imp.stack.set_visible_child_name("login");
+        imp.stack.set_visible_child_name(if self.has_saved_session_candidate() {
+            "loading"
+        } else {
+            "login"
+        });
 
         // Build the persistent bottom player bar
         self.build_player_bar();
@@ -346,6 +358,15 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
 
         // Try auto-login from saved credentials
         self.try_restore_session();
+    }
+
+    fn has_saved_session_candidate(&self) -> bool {
+        let saved = self.read_stored_session();
+        if saved.server_url.is_empty() {
+            return false;
+        }
+
+        !saved.token.is_empty() || !self.lookup_secret_token().is_empty()
     }
 
     fn install_styles(&self) {
@@ -468,21 +489,33 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
     fn save_credentials(&self) {
         let imp = self.imp();
         let token = imp.client.token().unwrap_or_default();
-        self.write_stored_session(&StoredSession {
+        let mut session = StoredSession {
             server_url: imp.client.server_url(),
             library_id: imp.library_id.borrow().clone(),
-        });
-        self.store_secret_token(&token);
+            token: String::new(),
+        };
+
+        if !token.is_empty() && !self.store_secret_token(&token) {
+            log::warn!("Falling back to storing the session token in the local session file");
+            session.token = token;
+        }
+
+        self.write_stored_session(&session);
         log::info!("Oturum bilgileri kaydedildi");
     }
 
     fn try_restore_session(&self) {
         let saved = self.read_stored_session();
         let server_url = saved.server_url;
-        let token = self.lookup_secret_token();
+        let mut token = self.lookup_secret_token();
+        let token_came_from_file = token.is_empty() && !saved.token.is_empty();
+        if token.is_empty() {
+            token = saved.token;
+        }
         let library_id = saved.library_id;
 
         if server_url.is_empty() || token.is_empty() {
+            self.imp().stack.set_visible_child_name("login");
             return;
         }
 
@@ -498,28 +531,38 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         let client = imp.client.clone();
         let win = self.clone();
         let saved_library_id = imp.library_id.borrow().clone();
+        let verification_library_id = saved_library_id.clone();
         glib::spawn_future_local(async move {
             let (tx, rx) = async_channel::bounded(1);
             std::thread::spawn(move || {
-                let result = if saved_library_id.is_empty() {
+                let result = if verification_library_id.is_empty() {
                     client.get_libraries().map(|_| ())
                 } else {
-                    client.get_library_items(&saved_library_id).map(|_| ())
+                    client.get_library_items(&verification_library_id).map(|_| ())
                 };
                 let _ = tx.send_blocking(result);
             });
             match rx.recv().await {
                 Ok(Ok(_)) => {
                     log::info!("Saved session is valid, loading library");
+                    if token_came_from_file && win.store_secret_token(&token) {
+                        win.write_stored_session(&StoredSession {
+                            server_url: server_url.clone(),
+                            library_id: saved_library_id.clone(),
+                            token: String::new(),
+                        });
+                    }
                     win.imp().stack.set_visible_child_name("library");
                     win.load_library();
                 }
                 Ok(Err(crate::api::ApiError::Auth(e))) => {
                     log::warn!("Saved token is invalid ({}), clearing credentials", e);
                     win.clear_stored_session();
+                    win.imp().stack.set_visible_child_name("login");
                 }
                 _ => {
                     log::warn!("Could not reach server, keeping saved credentials");
+                    win.imp().stack.set_visible_child_name("login");
                 }
             }
         });
@@ -726,6 +769,43 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
     }
 
     // ─── LOGIN PAGE ────────────────────────────────────────────────────────
+
+    fn build_loading_page(&self) -> gtk::Widget {
+        let toolbar_view = adw::ToolbarView::new();
+        let header = adw::HeaderBar::new();
+        header.set_title_widget(Some(&adw::WindowTitle::new("Shelfily Desktop", "")));
+        toolbar_view.add_top_bar(&header);
+
+        let clamp = adw::Clamp::new();
+        clamp.set_maximum_size(400);
+
+        let main_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        main_box.add_css_class("login-surface");
+        main_box.set_valign(gtk::Align::Center);
+        main_box.set_halign(gtk::Align::Center);
+        main_box.set_margin_start(24);
+        main_box.set_margin_end(24);
+        main_box.set_margin_top(24);
+        main_box.set_margin_bottom(24);
+
+        let spinner = gtk::Spinner::new();
+        spinner.set_spinning(true);
+        spinner.set_size_request(48, 48);
+        main_box.append(&spinner);
+
+        let title = gtk::Label::new(Some("Restoring session"));
+        title.add_css_class("title-3");
+        main_box.append(&title);
+
+        let subtitle = gtk::Label::new(Some("Checking your saved login..."));
+        subtitle.add_css_class("dim-label");
+        main_box.append(&subtitle);
+
+        clamp.set_child(Some(&main_box));
+        toolbar_view.set_content(Some(&clamp));
+
+        toolbar_view.upcast()
+    }
 
     fn build_login_page(&self) -> gtk::Widget {
         let toolbar_view = adw::ToolbarView::new();
