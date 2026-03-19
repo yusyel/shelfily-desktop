@@ -19,3 +19,11 @@ foreach size_dir : ['64x64', '128x128', '256x256', '512x512']
     install_dir: get_option('datadir') / 'icons' / png_dir
   )
 endforeach
+
+configure_file(
+  input: 'hicolor' / '512x512' / 'apps' / ('@0@.png').format(application_id),
+  output: '@0@.png'.format(application_id),
+  copy: true,
+  install: true,
+  install_dir: get_option('datadir') / 'pixmaps'
+)

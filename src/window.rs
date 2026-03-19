@@ -27,8 +27,6 @@ use crate::models::*;
 struct StoredSession {
     server_url: String,
     library_id: String,
-    #[serde(default)]
-    token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +165,20 @@ glib::wrapper! {
 }
 
 impl ShelfilyDesktopWindow {
+    fn log_secret_service_error(action: &str, err: &glib::Error) {
+        let details = err.to_string();
+        if details.contains("org.freedesktop.DBus.Error.ServiceUnknown") {
+            log::warn!(
+                "Could not {} the session token because no Secret Service is available. \
+If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original error: {}",
+                action,
+                details
+            );
+        } else {
+            log::warn!("Could not {} the session token: {}", action, details);
+        }
+    }
+
     fn secret_schema() -> libsecret::Schema {
         let mut attrs = HashMap::new();
         attrs.insert("account", libsecret::SchemaAttributeType::String);
@@ -193,7 +205,7 @@ impl ShelfilyDesktopWindow {
             token,
             gio::Cancellable::NONE,
         ) {
-            log::warn!("Token libsecret'e kaydedilemedi: {}", err);
+            Self::log_secret_service_error("store", &err);
         }
     }
 
@@ -207,7 +219,7 @@ impl ShelfilyDesktopWindow {
             Ok(Some(token)) => token.to_string(),
             Ok(None) => String::new(),
             Err(err) => {
-                log::warn!("Failed to read token from libsecret: {}", err);
+                Self::log_secret_service_error("read", &err);
                 String::new()
             }
         }
@@ -220,7 +232,7 @@ impl ShelfilyDesktopWindow {
             Self::secret_attrs(),
             gio::Cancellable::NONE,
         ) {
-            log::warn!("Token libsecret'ten silinemedi: {}", err);
+            Self::log_secret_service_error("clear", &err);
         }
     }
 
@@ -256,7 +268,9 @@ impl ShelfilyDesktopWindow {
     fn read_stored_session(&self) -> StoredSession {
         let mut session = StoredSession::default();
         let path = Self::session_file_path();
+        let mut had_legacy_token = false;
         if let Ok(content) = fs::read_to_string(path) {
+            had_legacy_token = content.contains("\"token\"");
             if let Ok(file_session) = serde_json::from_str::<StoredSession>(&content) {
                 session = file_session;
             }
@@ -272,6 +286,10 @@ impl ShelfilyDesktopWindow {
             if !library_id.is_empty() {
                 session.library_id = library_id;
             }
+        }
+
+        if had_legacy_token {
+            self.write_stored_session(&session);
         }
 
         session
@@ -453,7 +471,6 @@ impl ShelfilyDesktopWindow {
         self.write_stored_session(&StoredSession {
             server_url: imp.client.server_url(),
             library_id: imp.library_id.borrow().clone(),
-            token: token.clone(),
         });
         self.store_secret_token(&token);
         log::info!("Oturum bilgileri kaydedildi");
@@ -462,14 +479,7 @@ impl ShelfilyDesktopWindow {
     fn try_restore_session(&self) {
         let saved = self.read_stored_session();
         let server_url = saved.server_url;
-        let token = {
-            let secret_token = self.lookup_secret_token();
-            if secret_token.is_empty() {
-                saved.token
-            } else {
-                secret_token
-            }
-        };
+        let token = self.lookup_secret_token();
         let library_id = saved.library_id;
 
         if server_url.is_empty() || token.is_empty() {
@@ -1027,7 +1037,7 @@ impl ShelfilyDesktopWindow {
             }
             if let Some(uri) = wv.uri() {
                 let uri_str: String = uri.into();
-                log::debug!("WebView URI: {}", uri_str);
+                log::debug!("WebView URI changed during OAuth flow");
 
                 if let Some(token) = extract_access_token(&uri_str) {
                     token_found_c.set(true);
@@ -2179,7 +2189,7 @@ impl ShelfilyDesktopWindow {
             }
         };
 
-        log::info!("Starting audio stream: {}", stream_url);
+        log::info!("Starting audio stream");
 
         let playbin = gstreamer::ElementFactory::make("playbin3")
             .property("uri", &stream_url)
