@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "shelfily-desktop"
-version = "0.1.0"
+version = "0.1.19"
 dependencies = [
  "async-channel",
  "env_logger",
