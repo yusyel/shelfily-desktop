@@ -58,6 +58,10 @@ pub struct User {
     pub id: String,
     pub username: String,
     pub token: Option<String>,
+    #[serde(rename = "accessToken")]
+    pub access_token: Option<String>,
+    #[serde(rename = "refreshToken")]
+    pub refresh_token: Option<String>,
     #[serde(rename = "type")]
     pub user_type: Option<String>,
     #[serde(rename = "mediaProgress")]
@@ -306,7 +310,7 @@ impl Default for DeviceInfo {
         Self {
             device_id: "shelfily-desktop-gtk".to_string(),
             client_name: "Shelfily Desktop GTK".to_string(),
-            client_version: "0.1.0".to_string(),
+            client_version: "0.1.19".to_string(),
             device_name: hostname(),
             device_type: "desktop".to_string(),
         }

@@ -29,6 +29,18 @@ struct StoredSession {
     library_id: String,
     #[serde(default)]
     token: String,
+    #[serde(default)]
+    access_token: String,
+    #[serde(default)]
+    refresh_token: String,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct SecretSessionTokens {
+    #[serde(default)]
+    access_token: String,
+    #[serde(default)]
+    refresh_token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +179,20 @@ glib::wrapper! {
 }
 
 impl ShelfilyDesktopWindow {
+    fn preferred_session_token(
+        access_token: &str,
+        legacy_token: &str,
+        refresh_token: &str,
+    ) -> String {
+        if refresh_token.is_empty() && !legacy_token.is_empty() {
+            legacy_token.to_string()
+        } else if !access_token.is_empty() {
+            access_token.to_string()
+        } else {
+            legacy_token.to_string()
+        }
+    }
+
     fn log_secret_service_error(action: &str, err: &glib::Error) {
         let details = err.to_string();
         if details.contains("org.freedesktop.DBus.Error.ServiceUnknown") {
@@ -191,20 +217,56 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         )
     }
 
-    fn secret_attrs() -> HashMap<&'static str, &'static str> {
+    fn secret_attrs<'a>(account: &'a str) -> HashMap<&'static str, &'a str> {
         let mut attrs = HashMap::new();
-        attrs.insert("account", "default");
+        attrs.insert("account", account);
         attrs
     }
 
-    fn store_secret_token(&self, token: &str) -> bool {
+    fn legacy_secret_account() -> &'static str {
+        "default"
+    }
+
+    fn secret_account_for_server(server_url: &str) -> String {
+        let trimmed = server_url.trim_end_matches('/');
+        if trimmed.is_empty() {
+            Self::legacy_secret_account().to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn parse_secret_tokens(raw: &str) -> SecretSessionTokens {
+        serde_json::from_str::<SecretSessionTokens>(raw).unwrap_or_else(|_| SecretSessionTokens {
+            access_token: raw.to_string(),
+            refresh_token: String::new(),
+        })
+    }
+
+    fn store_secret_tokens(
+        &self,
+        server_url: &str,
+        access_token: &str,
+        refresh_token: &str,
+    ) -> bool {
+        let account = Self::secret_account_for_server(server_url);
+        let payload = match serde_json::to_string(&SecretSessionTokens {
+            access_token: access_token.to_string(),
+            refresh_token: refresh_token.to_string(),
+        }) {
+            Ok(payload) => payload,
+            Err(err) => {
+                log::warn!("Could not serialize session tokens: {}", err);
+                return false;
+            }
+        };
         let schema = Self::secret_schema();
         match libsecret::password_store_sync(
             Some(&schema),
-            Self::secret_attrs(),
+            Self::secret_attrs(&account),
             Some(libsecret::COLLECTION_DEFAULT.as_str()),
-            "Shelfily Desktop Session Token",
-            token,
+            "Shelfily Desktop Session Tokens",
+            &payload,
             gio::Cancellable::NONE,
         ) {
             Ok(_) => true,
@@ -215,30 +277,48 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         }
     }
 
-    fn lookup_secret_token(&self) -> String {
+    fn lookup_secret_tokens_for_account(account: &str) -> SecretSessionTokens {
         let schema = Self::secret_schema();
         match libsecret::password_lookup_sync(
             Some(&schema),
-            Self::secret_attrs(),
+            Self::secret_attrs(account),
             gio::Cancellable::NONE,
         ) {
-            Ok(Some(token)) => token.to_string(),
-            Ok(None) => String::new(),
+            Ok(Some(tokens)) => Self::parse_secret_tokens(tokens.as_ref()),
+            Ok(None) => SecretSessionTokens::default(),
             Err(err) => {
                 Self::log_secret_service_error("read", &err);
-                String::new()
+                SecretSessionTokens::default()
             }
         }
     }
 
-    fn clear_secret_token(&self) {
+    fn lookup_secret_tokens(&self, server_url: &str) -> SecretSessionTokens {
+        let account = Self::secret_account_for_server(server_url);
+        let tokens = Self::lookup_secret_tokens_for_account(&account);
+        if !tokens.access_token.is_empty() || account == Self::legacy_secret_account() {
+            return tokens;
+        }
+
+        Self::lookup_secret_tokens_for_account(Self::legacy_secret_account())
+    }
+
+    fn clear_secret_tokens_for_account(account: &str) {
         let schema = Self::secret_schema();
         if let Err(err) = libsecret::password_clear_sync(
             Some(&schema),
-            Self::secret_attrs(),
+            Self::secret_attrs(account),
             gio::Cancellable::NONE,
         ) {
             Self::log_secret_service_error("clear", &err);
+        }
+    }
+
+    fn clear_secret_tokens(&self, server_url: &str) {
+        let account = Self::secret_account_for_server(server_url);
+        Self::clear_secret_tokens_for_account(&account);
+        if account != Self::legacy_secret_account() {
+            Self::clear_secret_tokens_for_account(Self::legacy_secret_account());
         }
     }
 
@@ -276,7 +356,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         let path = Self::session_file_path();
         let mut had_legacy_token = false;
         if let Ok(content) = fs::read_to_string(path) {
-            had_legacy_token = content.contains("\"token\"");
+            had_legacy_token = content.contains("\"token\":");
             if let Ok(file_session) = serde_json::from_str::<StoredSession>(&content) {
                 session = file_session;
             }
@@ -302,9 +382,10 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
     }
 
     fn clear_stored_session(&self) {
+        let saved = self.read_stored_session();
         self.write_stored_session(&StoredSession::default());
         let _ = fs::remove_file(Self::session_file_path());
-        self.clear_secret_token();
+        self.clear_secret_tokens(&saved.server_url);
     }
 
     pub fn new<P: IsA<gtk::Application>>(application: &P) -> Self {
@@ -366,7 +447,10 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             return false;
         }
 
-        !saved.token.is_empty() || !self.lookup_secret_token().is_empty()
+        let secret_tokens = self.lookup_secret_tokens(&saved.server_url);
+        !secret_tokens.access_token.is_empty()
+            || !saved.access_token.is_empty()
+            || !saved.token.is_empty()
     }
 
     fn install_styles(&self) {
@@ -488,16 +572,23 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
 
     fn save_credentials(&self) {
         let imp = self.imp();
-        let token = imp.client.token().unwrap_or_default();
+        let access_token = imp.client.access_token().unwrap_or_default();
+        let refresh_token = imp.client.refresh_token().unwrap_or_default();
         let mut session = StoredSession {
             server_url: imp.client.server_url(),
             library_id: imp.library_id.borrow().clone(),
             token: String::new(),
+            access_token: String::new(),
+            refresh_token: String::new(),
         };
 
-        if !token.is_empty() && !self.store_secret_token(&token) {
-            log::warn!("Falling back to storing the session token in the local session file");
-            session.token = token;
+        if !access_token.is_empty()
+            && !self.store_secret_tokens(&session.server_url, &access_token, &refresh_token)
+        {
+            log::warn!("Falling back to storing the session tokens in the local session file");
+            session.access_token = access_token.clone();
+            session.refresh_token = refresh_token.clone();
+            session.token = access_token;
         }
 
         self.write_stored_session(&session);
@@ -507,14 +598,42 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
     fn try_restore_session(&self) {
         let saved = self.read_stored_session();
         let server_url = saved.server_url;
-        let mut token = self.lookup_secret_token();
-        let token_came_from_file = token.is_empty() && !saved.token.is_empty();
-        if token.is_empty() {
-            token = saved.token;
+        let secret_tokens = self.lookup_secret_tokens(&server_url);
+        let access_token_came_from_file = secret_tokens.access_token.is_empty()
+            && (!saved.access_token.is_empty() || !saved.token.is_empty());
+        let refresh_token_came_from_file =
+            secret_tokens.refresh_token.is_empty() && !saved.refresh_token.is_empty();
+        let mut refresh_token = secret_tokens.refresh_token;
+        if refresh_token.is_empty() {
+            refresh_token = saved.refresh_token.clone();
+        }
+        let mut access_token = if !refresh_token.is_empty() {
+            if secret_tokens.access_token.is_empty() {
+                saved.access_token.clone()
+            } else {
+                secret_tokens.access_token.clone()
+            }
+        } else {
+            Self::preferred_session_token(
+                if secret_tokens.access_token.is_empty() {
+                    &saved.access_token
+                } else {
+                    &secret_tokens.access_token
+                },
+                &saved.token,
+                &refresh_token,
+            )
+        };
+        if access_token.is_empty() {
+            access_token = Self::preferred_session_token(
+                &saved.access_token,
+                &saved.token,
+                &refresh_token,
+            );
         }
         let library_id = saved.library_id;
 
-        if server_url.is_empty() || token.is_empty() {
+        if server_url.is_empty() || access_token.is_empty() {
             self.imp().stack.set_visible_child_name("login");
             return;
         }
@@ -522,7 +641,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         log::info!("Found saved session, trying login...");
         let imp = self.imp();
         imp.client.set_server(&server_url);
-        imp.client.set_token(&token);
+        imp.client.set_tokens(&access_token, &refresh_token);
         if !library_id.is_empty() {
             *imp.library_id.borrow_mut() = library_id;
         }
@@ -545,13 +664,10 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             match rx.recv().await {
                 Ok(Ok(_)) => {
                     log::info!("Saved session is valid, loading library");
-                    if token_came_from_file && win.store_secret_token(&token) {
-                        win.write_stored_session(&StoredSession {
-                            server_url: server_url.clone(),
-                            library_id: saved_library_id.clone(),
-                            token: String::new(),
-                        });
+                    if access_token_came_from_file || refresh_token_came_from_file {
+                        log::info!("Migrating stored session tokens to secret storage");
                     }
+                    win.save_credentials();
                     win.imp().stack.set_visible_child_name("library");
                     win.load_library();
                 }
@@ -946,10 +1062,43 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                         spn_c.set_visible(false);
                         btn_c.set_sensitive(true);
 
-                        let token = login_resp.user.token.unwrap_or_default();
+                        let legacy_token =
+                            login_resp.user.token.as_deref().unwrap_or_default().to_string();
+                        let raw_access_token = login_resp
+                            .user
+                            .access_token
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_string();
+                        let refresh_token = login_resp
+                            .user
+                            .refresh_token
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_string();
+                        let access_token = login_resp
+                            .user
+                            .access_token
+                            .as_deref()
+                            .or(login_resp.user.token.as_deref())
+                            .unwrap_or_default();
+                        let session_token = Self::preferred_session_token(
+                            if raw_access_token.is_empty() {
+                                access_token
+                            } else {
+                                &raw_access_token
+                            },
+                            &legacy_token,
+                            &refresh_token,
+                        );
                         let default_lib = login_resp.user_default_library_id.unwrap_or_default();
 
-                        win_c.on_login_success(&server_url, &token, &default_lib);
+                        win_c.on_login_success(
+                            &server_url,
+                            &session_token,
+                            &refresh_token,
+                            &default_lib,
+                        );
                     }
                     Ok((Err(e), _)) => {
                         spn_c.set_spinning(false);
@@ -1050,10 +1199,16 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         toolbar_view.upcast()
     }
 
-    fn on_login_success(&self, server_url: &str, token: &str, default_library_id: &str) {
+    fn on_login_success(
+        &self,
+        server_url: &str,
+        access_token: &str,
+        refresh_token: &str,
+        default_library_id: &str,
+    ) {
         let imp = self.imp();
         imp.client.set_server(server_url);
-        imp.client.set_token(token);
+        imp.client.set_tokens(access_token, refresh_token);
 
         if !default_library_id.is_empty() {
             *imp.library_id.borrow_mut() = default_library_id.to_string();
@@ -1119,11 +1274,66 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 let uri_str: String = uri.into();
                 log::debug!("WebView URI changed during OAuth flow");
 
-                if let Some(token) = extract_access_token(&uri_str) {
+                if let Some(access_token) = extract_access_token(&uri_str) {
                     token_found_c.set(true);
                     log::info!("OAuth token received");
-                    dlg.close();
-                    win.on_login_success(&srv, &token, "");
+                    let refresh_token = extract_refresh_token(&uri_str).unwrap_or_default();
+                    if !refresh_token.is_empty() {
+                        dlg.close();
+                        win.on_login_success(&srv, &access_token, &refresh_token, "");
+                        return;
+                    }
+
+                    let win_c = win.clone();
+                    let dlg_c = dlg.clone();
+                    let srv_c = srv.clone();
+                    let access_token_c = access_token.clone();
+                    if let Some(cookie_manager) =
+                        wv.network_session().and_then(|session| session.cookie_manager())
+                    {
+                        let cookie_uri = srv_c.clone();
+                        cookie_manager.cookies(&srv_c, gio::Cancellable::NONE, move |result| {
+                            let refresh_token = match result {
+                                Ok(cookies) => cookies
+                                    .into_iter()
+                                    .find_map(|mut cookie| {
+                                        let name = cookie.name()?.to_string();
+                                        if name == "refresh_token" {
+                                            cookie.value().map(|value| value.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_default(),
+                                Err(err) => {
+                                    log::warn!(
+                                        "Could not read OAuth refresh token cookie: {}",
+                                        err
+                                    );
+                                    String::new()
+                                }
+                            };
+                            if refresh_token.is_empty() {
+                                log::warn!(
+                                    "OAuth login completed without a refresh token; \
+the session may expire and require signing in again"
+                                );
+                            }
+                            dlg_c.close();
+                            win_c.on_login_success(
+                                &cookie_uri,
+                                &access_token_c,
+                                &refresh_token,
+                                "",
+                            );
+                        });
+                    } else {
+                        log::warn!(
+                            "OAuth cookie manager is unavailable; continuing without a refresh token"
+                        );
+                        dlg.close();
+                        win.on_login_success(&srv, &access_token, "", "");
+                    }
                 }
             }
         });
@@ -2450,6 +2660,10 @@ fn extract_access_token(url: &str) -> Option<String> {
     extract_url_param(url, "access_token")
         .or_else(|| extract_url_param(url, "accessToken"))
         .or_else(|| extract_url_param(url, "token"))
+}
+
+fn extract_refresh_token(url: &str) -> Option<String> {
+    extract_url_param(url, "refresh_token").or_else(|| extract_url_param(url, "refreshToken"))
 }
 
 fn extract_url_param(url: &str, key: &str) -> Option<String> {

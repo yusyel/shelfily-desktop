@@ -32,7 +32,8 @@ pub struct AudiobookshelfClient {
 struct ClientInner {
     client: Client,
     base_url: String,
-    token: Option<String>,
+    access_token: Option<String>,
+    refresh_token: Option<String>,
 }
 
 impl AudiobookshelfClient {
@@ -44,7 +45,8 @@ impl AudiobookshelfClient {
                     .build()
                     .expect("Failed to create HTTP client"),
                 base_url: String::new(),
-                token: None,
+                access_token: None,
+                refresh_token: None,
             })),
         }
     }
@@ -60,25 +62,65 @@ impl AudiobookshelfClient {
     }
 
     pub fn set_token(&self, token: &str) {
+        self.set_access_token(token);
+    }
+
+    pub fn set_access_token(&self, token: &str) {
         let mut inner = self.inner.lock().unwrap();
-        inner.token = Some(token.to_string());
+        inner.access_token = if token.is_empty() {
+            None
+        } else {
+            Some(token.to_string())
+        };
+    }
+
+    pub fn set_refresh_token(&self, token: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.refresh_token = if token.is_empty() {
+            None
+        } else {
+            Some(token.to_string())
+        };
+    }
+
+    pub fn set_tokens(&self, access_token: &str, refresh_token: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.access_token = if access_token.is_empty() {
+            None
+        } else {
+            Some(access_token.to_string())
+        };
+        inner.refresh_token = if refresh_token.is_empty() {
+            None
+        } else {
+            Some(refresh_token.to_string())
+        };
     }
 
     pub fn token(&self) -> Option<String> {
+        self.access_token()
+    }
+
+    pub fn access_token(&self) -> Option<String> {
         let inner = self.inner.lock().unwrap();
-        inner.token.clone()
+        inner.access_token.clone()
+    }
+
+    pub fn refresh_token(&self) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.refresh_token.clone()
     }
 
     pub fn is_authenticated(&self) -> bool {
         let inner = self.inner.lock().unwrap();
-        inner.token.is_some()
+        inner.access_token.is_some()
     }
 
     /// Login with username and password
     /// POST /login
     pub fn login(&self, username: &str, password: &str) -> Result<LoginResponse, ApiError> {
-        let (client, base_url, _) = self.connection_info();
-        let url = format!("{}/login", base_url);
+        let (client, base_url, _, _) = self.connection_info();
+        let url = format!("{}/login?return_tokens=true", base_url);
 
         let body = serde_json::json!({
             "username": username,
@@ -87,6 +129,7 @@ impl AudiobookshelfClient {
 
         let resp = client
             .post(&url)
+            .header("x-return-tokens", "true")
             .json(&body)
             .send()
             .map_err(|e| ApiError::Network(e.to_string()))?;
@@ -105,7 +148,7 @@ impl AudiobookshelfClient {
 
     /// GET /status — check server status and available auth methods
     pub fn get_status(&self) -> Result<ServerStatus, ApiError> {
-        let (client, base_url, _) = self.connection_info();
+        let (client, base_url, _, _) = self.connection_info();
         let url = format!("{}/status", base_url);
         let resp = client
             .get(&url)
@@ -248,36 +291,12 @@ impl AudiobookshelfClient {
             "duration": duration,
             "timeListened": 0,
         });
-        let (client, base_url, token) = self.connection_info();
-        let url = format!("{}/api/session/{}/close", base_url, session_id);
-        let mut req = client.post(&url);
-        if let Some(ref t) = token {
-            req = req.header("Authorization", format!("Bearer {}", t));
-        }
-        let resp = req
-            .json(&body)
-            .send()
-            .map_err(|e| ApiError::Network(e.to_string()))?;
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            Err(ApiError::Server(format!("HTTP {}", resp.status())))
-        }
+        self.execute_empty_post(&format!("/api/session/{}/close", session_id), &body)
     }
 
     /// GET /api/me/items-in-progress
     pub fn get_items_in_progress(&self) -> Result<Vec<LibraryItem>, ApiError> {
-        let (client, base_url, token) = self.connection_info();
-        let url = format!("{}/api/me/items-in-progress", base_url);
-        let mut req = client.get(&url);
-        if let Some(ref t) = token {
-            req = req.header("Authorization", format!("Bearer {}", t));
-        }
-        let resp = req.send().map_err(|e| ApiError::Network(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(ApiError::Server(format!("HTTP {}", resp.status())));
-        }
-        let body: serde_json::Value = resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
+        let body: serde_json::Value = self.get("/api/me/items-in-progress")?;
 
         // API may return an array directly or { "libraryItems": [...] }
         let arr = if body.is_array() {
@@ -295,56 +314,140 @@ impl AudiobookshelfClient {
 
     /// GET /api/me/progress/:id
     pub fn get_media_progress(&self, item_id: &str) -> Result<Option<MediaProgress>, ApiError> {
-        let (client, base_url, token) = self.connection_info();
-        let url = format!("{}/api/me/progress/{}", base_url, item_id);
-        let mut req = client.get(&url);
-        if let Some(ref t) = token {
-            req = req.header("Authorization", format!("Bearer {}", t));
-        }
-        let resp = req.send().map_err(|e| ApiError::Network(e.to_string()))?;
-        if resp.status() == 404 {
-            return Ok(None);
-        }
-        if resp.status().is_success() {
-            let progress: MediaProgress =
-                resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
-            Ok(Some(progress))
-        } else {
-            Err(ApiError::Server(format!("HTTP {}", resp.status())))
+        let mut attempted_refresh = false;
+
+        loop {
+            let (client, base_url, access_token, _) = self.connection_info();
+            let url = format!("{}/api/me/progress/{}", base_url, item_id);
+            let mut req = client.get(&url);
+            if let Some(ref t) = access_token {
+                req = req.header("Authorization", format!("Bearer {}", t));
+            }
+
+            let resp = req.send().map_err(|e| ApiError::Network(e.to_string()))?;
+            let status = resp.status();
+            if status == 404 {
+                return Ok(None);
+            }
+            if status.is_success() {
+                let progress: MediaProgress =
+                    resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
+                return Ok(Some(progress));
+            }
+            if (status.as_u16() == 401 || status.as_u16() == 403) && !attempted_refresh {
+                attempted_refresh = true;
+                if self.refresh_access_token()? {
+                    continue;
+                }
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+            return Err(ApiError::Server(format!("HTTP {}", status)));
         }
     }
 
     /// Helper: extract base_url, token, and client clone from the inner lock
-    fn connection_info(&self) -> (Client, String, Option<String>) {
+    fn connection_info(&self) -> (Client, String, Option<String>, Option<String>) {
         let inner = self.inner.lock().unwrap();
         (
             inner.client.clone(),
             inner.base_url.clone(),
-            inner.token.clone(),
+            inner.access_token.clone(),
+            inner.refresh_token.clone(),
         )
+    }
+
+    fn apply_refreshed_tokens(&self, login_resp: &LoginResponse) -> bool {
+        let access_token = login_resp
+            .user
+            .access_token
+            .as_deref()
+            .or(login_resp.user.token.as_deref())
+            .unwrap_or_default();
+        if access_token.is_empty() {
+            return false;
+        }
+
+        let refresh_token = login_resp.user.refresh_token.as_deref().unwrap_or_default();
+        self.set_tokens(access_token, refresh_token);
+        true
+    }
+
+    fn refresh_access_token(&self) -> Result<bool, ApiError> {
+        let (client, base_url, _, refresh_token) = self.connection_info();
+        let Some(refresh_token) = refresh_token else {
+            return Ok(false);
+        };
+        if refresh_token.is_empty() {
+            return Ok(false);
+        }
+
+        let url = format!("{}/auth/refresh", base_url);
+        let resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", refresh_token))
+            .header("x-refresh-token", &refresh_token)
+            .header("x-return-tokens", "true")
+            .send()
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if resp.status().is_success() {
+            let login_resp: LoginResponse =
+                resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
+            Ok(self.apply_refreshed_tokens(&login_resp))
+        } else if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
+            Ok(false)
+        } else {
+            Err(ApiError::Server(format!("HTTP {}", resp.status())))
+        }
+    }
+
+    fn execute_json<T, F>(&self, path: &str, send: F) -> Result<T, ApiError>
+    where
+        T: serde::de::DeserializeOwned,
+        F: Fn(&Client, &str, Option<&str>) -> Result<reqwest::blocking::Response, reqwest::Error>,
+    {
+        let mut attempted_refresh = false;
+
+        loop {
+            let (client, base_url, access_token, _) = self.connection_info();
+            let url = format!("{}{}", base_url, path);
+            let resp = send(&client, &url, access_token.as_deref())
+                .map_err(|e| ApiError::Network(e.to_string()))?;
+            let status = resp.status();
+
+            if status.is_success() {
+                let body: T = resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
+                return Ok(body);
+            }
+
+            if (status.as_u16() == 401 || status.as_u16() == 403) && !attempted_refresh {
+                attempted_refresh = true;
+                if self.refresh_access_token()? {
+                    continue;
+                }
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            return Err(ApiError::Server(format!("HTTP {}", status)));
+        }
     }
 
     /// Download cover image bytes
     pub fn download_cover(&self, item_id: &str) -> Result<Vec<u8>, ApiError> {
-        let (client, base_url, token) = self.connection_info();
-        let url = format!("{}/api/items/{}/cover?width=400", base_url, item_id);
-        let mut req = client.get(&url);
-        if let Some(ref t) = token {
-            req = req.header("Authorization", format!("Bearer {}", t));
-        }
-        let resp = req.send().map_err(|e| ApiError::Network(e.to_string()))?;
-        if resp.status().is_success() {
-            let bytes = resp.bytes().map_err(|e| ApiError::Network(e.to_string()))?;
-            Ok(bytes.to_vec())
-        } else {
-            Err(ApiError::Server(format!("HTTP {}", resp.status())))
-        }
+        self.execute_json_bytes(&format!("/api/items/{}/cover?width=400", item_id))
     }
 
     /// Build audio stream URL for a track
     pub fn audio_stream_url(&self, content_url: &str) -> String {
         let inner = self.inner.lock().unwrap();
-        let token = inner.token.as_deref().unwrap_or("");
+        let token = inner.access_token.as_deref().unwrap_or("");
         let base = if content_url.starts_with("http://") || content_url.starts_with("https://") {
             content_url.to_string()
         } else {
@@ -361,22 +464,13 @@ impl AudiobookshelfClient {
 
     /// Generic GET request
     fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
-        let (client, base_url, token) = self.connection_info();
-        let url = format!("{}{}", base_url, path);
-        let mut req = client.get(&url);
-        if let Some(ref t) = token {
-            req = req.header("Authorization", format!("Bearer {}", t));
-        }
-        let resp = req.send().map_err(|e| ApiError::Network(e.to_string()))?;
-        let status = resp.status();
-        if status.is_success() {
-            let body: T = resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
-            Ok(body)
-        } else if status.as_u16() == 401 || status.as_u16() == 403 {
-            Err(ApiError::Auth(format!("HTTP {}", status)))
-        } else {
-            Err(ApiError::Server(format!("HTTP {}", status)))
-        }
+        self.execute_json(path, |client, url, access_token| {
+            let mut req = client.get(url);
+            if let Some(token) = access_token {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+            req.send()
+        })
     }
 
     /// Generic POST request
@@ -385,21 +479,84 @@ impl AudiobookshelfClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<T, ApiError> {
-        let (client, base_url, token) = self.connection_info();
-        let url = format!("{}{}", base_url, path);
-        let mut req = client.post(&url);
-        if let Some(ref t) = token {
-            req = req.header("Authorization", format!("Bearer {}", t));
+        self.execute_json(path, |client, url, access_token| {
+            let mut req = client.post(url);
+            if let Some(token) = access_token {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+            req.json(body).send()
+        })
+    }
+
+    fn execute_json_bytes(&self, path: &str) -> Result<Vec<u8>, ApiError> {
+        let mut attempted_refresh = false;
+
+        loop {
+            let (client, base_url, access_token, _) = self.connection_info();
+            let url = format!("{}{}", base_url, path);
+            let mut req = client.get(&url);
+            if let Some(token) = access_token.as_deref() {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+
+            let resp = req.send().map_err(|e| ApiError::Network(e.to_string()))?;
+            let status = resp.status();
+
+            if status.is_success() {
+                let bytes = resp.bytes().map_err(|e| ApiError::Network(e.to_string()))?;
+                return Ok(bytes.to_vec());
+            }
+
+            if (status.as_u16() == 401 || status.as_u16() == 403) && !attempted_refresh {
+                attempted_refresh = true;
+                if self.refresh_access_token()? {
+                    continue;
+                }
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            return Err(ApiError::Server(format!("HTTP {}", status)));
         }
-        let resp = req
-            .json(body)
-            .send()
-            .map_err(|e| ApiError::Network(e.to_string()))?;
-        if resp.status().is_success() {
-            let data: T = resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
-            Ok(data)
-        } else {
-            Err(ApiError::Server(format!("HTTP {}", resp.status())))
+    }
+
+    fn execute_empty_post(&self, path: &str, body: &serde_json::Value) -> Result<(), ApiError> {
+        let mut attempted_refresh = false;
+
+        loop {
+            let (client, base_url, access_token, _) = self.connection_info();
+            let url = format!("{}{}", base_url, path);
+            let mut req = client.post(&url);
+            if let Some(token) = access_token.as_deref() {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+
+            let resp = req
+                .json(body)
+                .send()
+                .map_err(|e| ApiError::Network(e.to_string()))?;
+            let status = resp.status();
+
+            if status.is_success() {
+                return Ok(());
+            }
+
+            if (status.as_u16() == 401 || status.as_u16() == 403) && !attempted_refresh {
+                attempted_refresh = true;
+                if self.refresh_access_token()? {
+                    continue;
+                }
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            return Err(ApiError::Server(format!("HTTP {}", status)));
         }
     }
 }
