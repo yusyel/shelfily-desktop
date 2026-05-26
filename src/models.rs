@@ -66,6 +66,17 @@ pub struct User {
     pub user_type: Option<String>,
     #[serde(rename = "mediaProgress")]
     pub media_progress: Option<Vec<MediaProgress>>,
+    pub bookmarks: Option<Vec<Bookmark>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Bookmark {
+    #[serde(rename = "libraryItemId")]
+    pub library_item_id: Option<String>,
+    pub title: Option<String>,
+    pub time: Option<f64>,
+    #[serde(rename = "createdAt")]
+    pub created_at: Option<u64>,
 }
 
 // ─── Libraries ──────────────────────────────────────────────────────────────

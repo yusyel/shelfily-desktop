@@ -76,6 +76,10 @@ mod imp {
         pub detail_play_item_id: RefCell<Option<String>>,
         pub chapter_indicators: RefCell<Vec<(f64, f64, gtk::Box)>>,
         pub detail_is_finished: Rc<Cell<bool>>,
+        pub bookmarks: RefCell<Vec<Bookmark>>,
+        pub bookmarks_group: RefCell<Option<adw::PreferencesGroup>>,
+        pub bookmarks_section: RefCell<Option<gtk::Box>>,
+        pub library_search_entry: RefCell<Option<gtk::SearchEntry>>,
         // Persistent bottom player bar
         pub player_bar: gtk::ActionBar,
         pub player_title: gtk::Label,
@@ -132,6 +136,10 @@ mod imp {
                 detail_play_item_id: RefCell::new(None),
                 chapter_indicators: RefCell::new(Vec::new()),
                 detail_is_finished: Rc::new(Cell::new(false)),
+                bookmarks: RefCell::new(Vec::new()),
+                bookmarks_group: RefCell::new(None),
+                bookmarks_section: RefCell::new(None),
+                library_search_entry: RefCell::new(None),
                 player_bar,
                 player_title: gtk::Label::new(None),
                 player_author: gtk::Label::new(None),
@@ -808,6 +816,15 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         });
         controls.append(&fwd_btn);
 
+        let bookmark_btn = gtk::Button::from_icon_name("bookmark-new-symbolic");
+        bookmark_btn.add_css_class("flat");
+        bookmark_btn.set_tooltip_text(Some("Bookmark current position"));
+        let win = self.clone();
+        bookmark_btn.connect_clicked(move |_| {
+            win.add_bookmark_at_current_position();
+        });
+        controls.append(&bookmark_btn);
+
         center_box.append(&controls);
 
         // Progress row
@@ -889,6 +906,19 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         }
     }
 
+    fn filter_library_by_author(&self, author_name: &str) {
+        let imp = self.imp();
+        if let Some(nav_view) = imp.nav_view.borrow().as_ref() {
+            while nav_view.pop() {}
+        }
+        *imp.library_search_query.borrow_mut() = author_name.to_string();
+        if let Some(entry) = imp.library_search_entry.borrow().as_ref() {
+            entry.set_text(author_name);
+        }
+        self.render_library();
+        self.render_continue_listening();
+    }
+
     fn refresh_chapter_indicators(&self, current_time: f64) {
         let imp = self.imp();
         let detail_is_current = imp.detail_play_item_id.borrow().as_deref()
@@ -897,6 +927,285 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             return;
         }
         self.apply_chapter_indicators(current_time);
+    }
+
+    // ─── BOOKMARKS ──────────────────────────────────────────────────────────
+
+    fn add_bookmark_at_current_position(&self) {
+        let imp = self.imp();
+        let item_id = match imp.current_item_id.borrow().clone() {
+            Some(id) => id,
+            None => {
+                let toast = adw::Toast::new("Start playback first to add a bookmark");
+                imp.toast_overlay.add_toast(toast);
+                return;
+            }
+        };
+        let time = *imp.current_time.borrow();
+        let default_title = format!("Bookmark at {}", format_time(time));
+        self.prompt_bookmark_dialog(&item_id, time, &default_title, true);
+    }
+
+    fn prompt_bookmark_dialog(
+        &self,
+        item_id: &str,
+        time: f64,
+        default_title: &str,
+        is_new: bool,
+    ) {
+        let dialog = adw::AlertDialog::new(
+            Some(if is_new { "New Bookmark" } else { "Edit Bookmark" }),
+            Some(&format!("At {}", format_time(time))),
+        );
+
+        let entry = gtk::Entry::new();
+        entry.set_text(default_title);
+        entry.set_placeholder_text(Some("Bookmark note"));
+        entry.set_activates_default(true);
+        entry.set_hexpand(true);
+        dialog.set_extra_child(Some(&entry));
+
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("save", if is_new { "Add" } else { "Save" });
+        dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("save"));
+        dialog.set_close_response("cancel");
+
+        let win = self.clone();
+        let item_id_owned = item_id.to_string();
+        let entry_clone = entry.clone();
+        dialog.connect_response(None, move |dlg, response| {
+            if response == "save" {
+                let title = entry_clone.text().to_string();
+                let title = if title.trim().is_empty() {
+                    format!("Bookmark at {}", format_time(time))
+                } else {
+                    title
+                };
+                if is_new {
+                    win.create_bookmark(&item_id_owned, &title, time);
+                } else {
+                    win.update_bookmark(&item_id_owned, &title, time);
+                }
+            }
+            dlg.close();
+        });
+
+        dialog.present(Some(self));
+    }
+
+    fn create_bookmark(&self, item_id: &str, title: &str, time: f64) {
+        let client = self.imp().client.clone();
+        let item_id_owned = item_id.to_string();
+        let title_owned = title.to_string();
+        let win = self.clone();
+        let (tx, rx) = async_channel::bounded::<Result<Bookmark, String>>(1);
+        std::thread::spawn(move || {
+            let result = client
+                .create_bookmark(&item_id_owned, &title_owned, time)
+                .map_err(|e| e.to_string());
+            let _ = tx.send_blocking(result);
+        });
+        let detail_item_id = self.imp().detail_play_item_id.borrow().clone();
+        let target_item_id = item_id.to_string();
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok(_)) => {
+                    let toast = adw::Toast::new("Bookmark added");
+                    win.imp().toast_overlay.add_toast(toast);
+                    if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
+                        win.load_bookmarks(&target_item_id);
+                    }
+                }
+                Ok(Err(err)) => {
+                    log::warn!("Create bookmark failed: {}", err);
+                    let toast =
+                        adw::Toast::new(&format!("Failed to add bookmark: {}", err));
+                    win.imp().toast_overlay.add_toast(toast);
+                }
+                Err(err) => {
+                    log::warn!("Bookmark channel error: {}", err);
+                }
+            }
+        });
+    }
+
+    fn update_bookmark(&self, item_id: &str, title: &str, time: f64) {
+        let client = self.imp().client.clone();
+        let item_id_owned = item_id.to_string();
+        let title_owned = title.to_string();
+        let target_item_id = item_id.to_string();
+        let win = self.clone();
+        let (tx, rx) = async_channel::bounded::<Result<(), String>>(1);
+        std::thread::spawn(move || {
+            let result = client
+                .update_bookmark(&item_id_owned, &title_owned, time)
+                .map_err(|e| e.to_string());
+            let _ = tx.send_blocking(result);
+        });
+        let detail_item_id = self.imp().detail_play_item_id.borrow().clone();
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok(())) => {
+                    let toast = adw::Toast::new("Bookmark updated");
+                    win.imp().toast_overlay.add_toast(toast);
+                    if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
+                        win.load_bookmarks(&target_item_id);
+                    }
+                }
+                Ok(Err(err)) => {
+                    log::warn!("Update bookmark failed: {}", err);
+                    let toast =
+                        adw::Toast::new(&format!("Failed to update bookmark: {}", err));
+                    win.imp().toast_overlay.add_toast(toast);
+                }
+                Err(err) => {
+                    log::warn!("Bookmark channel error: {}", err);
+                }
+            }
+        });
+    }
+
+    fn delete_bookmark(&self, item_id: &str, time: f64) {
+        let client = self.imp().client.clone();
+        let item_id_owned = item_id.to_string();
+        let target_item_id = item_id.to_string();
+        let win = self.clone();
+        let (tx, rx) = async_channel::bounded::<Result<(), String>>(1);
+        std::thread::spawn(move || {
+            let result = client
+                .delete_bookmark(&item_id_owned, time)
+                .map_err(|e| e.to_string());
+            let _ = tx.send_blocking(result);
+        });
+        let detail_item_id = self.imp().detail_play_item_id.borrow().clone();
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok(())) => {
+                    let toast = adw::Toast::new("Bookmark removed");
+                    win.imp().toast_overlay.add_toast(toast);
+                    if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
+                        win.load_bookmarks(&target_item_id);
+                    }
+                }
+                Ok(Err(err)) => {
+                    log::warn!("Delete bookmark failed: {}", err);
+                    let toast =
+                        adw::Toast::new(&format!("Failed to remove bookmark: {}", err));
+                    win.imp().toast_overlay.add_toast(toast);
+                }
+                Err(err) => {
+                    log::warn!("Bookmark channel error: {}", err);
+                }
+            }
+        });
+    }
+
+    fn load_bookmarks(&self, item_id: &str) {
+        let client = self.imp().client.clone();
+        let item_id_owned = item_id.to_string();
+        let target_item_id = item_id.to_string();
+        let win = self.clone();
+        let (tx, rx) = async_channel::bounded::<Result<Vec<Bookmark>, String>>(1);
+        std::thread::spawn(move || {
+            let result = client
+                .get_bookmarks_for_item(&item_id_owned)
+                .map_err(|e| e.to_string());
+            let _ = tx.send_blocking(result);
+        });
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok(bookmarks)) => {
+                    let detail_item_id = win.imp().detail_play_item_id.borrow().clone();
+                    if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
+                        *win.imp().bookmarks.borrow_mut() = bookmarks;
+                        win.render_bookmarks(&target_item_id);
+                    }
+                }
+                Ok(Err(err)) => log::warn!("Load bookmarks failed: {}", err),
+                Err(err) => log::warn!("Bookmark channel error: {}", err),
+            }
+        });
+    }
+
+    fn render_bookmarks(&self, item_id: &str) {
+        let imp = self.imp();
+        let section = match imp.bookmarks_section.borrow().clone() {
+            Some(s) => s,
+            None => return,
+        };
+
+        if let Some(old_group) = imp.bookmarks_group.borrow_mut().take() {
+            section.remove(&old_group);
+        }
+
+        let bookmarks = imp.bookmarks.borrow().clone();
+        if bookmarks.is_empty() {
+            section.set_visible(false);
+            return;
+        }
+        section.set_visible(true);
+
+        let group = adw::PreferencesGroup::new();
+
+        for bookmark in bookmarks.iter() {
+            let time = bookmark.time.unwrap_or(0.0);
+            let title = bookmark
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("Bookmark at {}", format_time(time)));
+
+            let row = adw::ActionRow::new();
+            row.set_title(&title);
+            row.set_subtitle(&format_time(time));
+
+            let icon = gtk::Image::from_icon_name("user-bookmarks-symbolic");
+            icon.add_css_class("dim-label");
+            row.add_prefix(&icon);
+
+            let play_btn = gtk::Button::from_icon_name("media-playback-start-symbolic");
+            play_btn.add_css_class("flat");
+            play_btn.add_css_class("circular");
+            play_btn.set_valign(gtk::Align::Center);
+            play_btn.set_tooltip_text(Some("Play from this position"));
+            let win_play = self.clone();
+            let item_id_play = item_id.to_string();
+            play_btn.connect_clicked(move |_| {
+                win_play.start_playback_at(&item_id_play, time);
+            });
+            row.add_suffix(&play_btn);
+
+            let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+            edit_btn.add_css_class("flat");
+            edit_btn.add_css_class("circular");
+            edit_btn.set_valign(gtk::Align::Center);
+            edit_btn.set_tooltip_text(Some("Edit note"));
+            let win_edit = self.clone();
+            let item_id_edit = item_id.to_string();
+            let title_edit = title.clone();
+            edit_btn.connect_clicked(move |_| {
+                win_edit.prompt_bookmark_dialog(&item_id_edit, time, &title_edit, false);
+            });
+            row.add_suffix(&edit_btn);
+
+            let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+            del_btn.add_css_class("flat");
+            del_btn.add_css_class("circular");
+            del_btn.set_valign(gtk::Align::Center);
+            del_btn.set_tooltip_text(Some("Remove bookmark"));
+            let win_del = self.clone();
+            let item_id_del = item_id.to_string();
+            del_btn.connect_clicked(move |_| {
+                win_del.delete_bookmark(&item_id_del, time);
+            });
+            row.add_suffix(&del_btn);
+
+            row.set_activatable_widget(Some(&play_btn));
+            group.add(&row);
+        }
+
+        section.append(&group);
+        *imp.bookmarks_group.borrow_mut() = Some(group);
     }
 
     fn refresh_detail_play_button(&self) {
@@ -1535,6 +1844,7 @@ the session may expire and require signing in again"
             win.render_library();
             win.render_continue_listening();
         });
+        *self.imp().library_search_entry.borrow_mut() = Some(search_entry.clone());
         search_popover_box.append(&search_entry);
         search_popover.set_child(Some(&search_popover_box));
         search_btn.set_popover(Some(&search_popover));
@@ -2191,6 +2501,9 @@ the session may expire and require signing in again"
         *imp.detail_top_box.borrow_mut() = None;
         *imp.detail_cover_image.borrow_mut() = None;
         imp.chapter_indicators.borrow_mut().clear();
+        imp.bookmarks.borrow_mut().clear();
+        *imp.bookmarks_group.borrow_mut() = None;
+        *imp.bookmarks_section.borrow_mut() = None;
 
         let metadata = item.media.as_ref().and_then(|m| m.metadata.as_ref());
 
@@ -2253,13 +2566,28 @@ the session may expire and require signing in again"
         }
 
         if let Some(authors) = metadata.and_then(|m| m.authors.as_ref()) {
-            let author_names: Vec<&str> = authors.iter().map(|a| a.name.as_str()).collect();
-            let author_text = author_names.join(", ");
-            let author_label = gtk::Label::new(Some(&author_text));
-            author_label.add_css_class("title-4");
-            author_label.set_halign(gtk::Align::Start);
-            author_label.set_wrap(true);
-            info_box.append(&author_label);
+            if !authors.is_empty() {
+                let authors_flow = gtk::FlowBox::new();
+                authors_flow.set_selection_mode(gtk::SelectionMode::None);
+                authors_flow.set_column_spacing(6);
+                authors_flow.set_row_spacing(6);
+                authors_flow.set_max_children_per_line(20);
+                authors_flow.set_halign(gtk::Align::Start);
+                for author in authors {
+                    let btn = gtk::Button::with_label(&author.name);
+                    btn.add_css_class("pill");
+                    btn.add_css_class("flat");
+                    btn.add_css_class("author-chip");
+                    btn.set_tooltip_text(Some(&format!("Show books by {}", author.name)));
+                    let name = author.name.clone();
+                    let win = self.clone();
+                    btn.connect_clicked(move |_| {
+                        win.filter_library_by_author(&name);
+                    });
+                    authors_flow.append(&btn);
+                }
+                info_box.append(&authors_flow);
+            }
         }
 
         if let Some(narrators) = metadata.and_then(|m| m.narrators.as_ref()) {
@@ -2551,6 +2879,24 @@ the session may expire and require signing in again"
                 detail_box.append(&chapters_group);
             }
         }
+
+        // Bookmarks section (populated asynchronously)
+        let bookmarks_section = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        bookmarks_section.set_visible(false);
+        let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+        bookmarks_section.append(&sep);
+        let bm_title = gtk::Label::new(Some("Bookmarks"));
+        bm_title.add_css_class("title-4");
+        bm_title.set_halign(gtk::Align::Start);
+        bookmarks_section.append(&bm_title);
+        let bookmarks_group = adw::PreferencesGroup::new();
+        bookmarks_section.append(&bookmarks_group);
+        detail_box.append(&bookmarks_section);
+
+        *imp.bookmarks_group.borrow_mut() = Some(bookmarks_group);
+        *imp.bookmarks_section.borrow_mut() = Some(bookmarks_section);
+
+        self.load_bookmarks(&item.id);
     }
 
     // ─── PLAYBACK ──────────────────────────────────────────────────────────

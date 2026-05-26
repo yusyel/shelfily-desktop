@@ -354,6 +354,63 @@ impl AudiobookshelfClient {
         self.execute_empty_patch(&format!("/api/me/progress/{}", item_id), &body)
     }
 
+    /// GET /api/me — fetches the current user, used to read bookmarks
+    pub fn get_me(&self) -> Result<User, ApiError> {
+        self.get("/api/me")
+    }
+
+    /// Returns the current user's bookmarks filtered by libraryItemId, sorted by time.
+    pub fn get_bookmarks_for_item(&self, item_id: &str) -> Result<Vec<Bookmark>, ApiError> {
+        let user = self.get_me()?;
+        let mut bookmarks: Vec<Bookmark> = user
+            .bookmarks
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|b| b.library_item_id.as_deref() == Some(item_id))
+            .collect();
+        bookmarks.sort_by(|a, b| {
+            a.time
+                .unwrap_or(0.0)
+                .partial_cmp(&b.time.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(bookmarks)
+    }
+
+    /// POST /api/me/item/:id/bookmark — create a bookmark at given time
+    pub fn create_bookmark(
+        &self,
+        item_id: &str,
+        title: &str,
+        time: f64,
+    ) -> Result<Bookmark, ApiError> {
+        let body = serde_json::json!({
+            "title": title,
+            "time": time as i64,
+        });
+        self.post(&format!("/api/me/item/{}/bookmark", item_id), &body)
+    }
+
+    /// PATCH /api/me/item/:id/bookmark — update a bookmark's title at given time
+    pub fn update_bookmark(
+        &self,
+        item_id: &str,
+        title: &str,
+        time: f64,
+    ) -> Result<(), ApiError> {
+        let body = serde_json::json!({
+            "title": title,
+            "time": time as i64,
+        });
+        self.execute_empty_patch(&format!("/api/me/item/{}/bookmark", item_id), &body)
+    }
+
+    /// DELETE /api/me/item/:id/bookmark/:time — delete a bookmark
+    pub fn delete_bookmark(&self, item_id: &str, time: f64) -> Result<(), ApiError> {
+        let path = format!("/api/me/item/{}/bookmark/{}", item_id, time as i64);
+        self.execute_empty_delete(&path)
+    }
+
     /// Helper: extract base_url, token, and client clone from the inner lock
     fn connection_info(&self) -> (Client, String, Option<String>, Option<String>) {
         let inner = self.inner.lock().unwrap();
@@ -544,6 +601,40 @@ impl AudiobookshelfClient {
                 .json(body)
                 .send()
                 .map_err(|e| ApiError::Network(e.to_string()))?;
+            let status = resp.status();
+
+            if status.is_success() {
+                return Ok(());
+            }
+
+            if (status.as_u16() == 401 || status.as_u16() == 403) && !attempted_refresh {
+                attempted_refresh = true;
+                if self.refresh_access_token()? {
+                    continue;
+                }
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            return Err(ApiError::Server(format!("HTTP {}", status)));
+        }
+    }
+
+    fn execute_empty_delete(&self, path: &str) -> Result<(), ApiError> {
+        let mut attempted_refresh = false;
+
+        loop {
+            let (client, base_url, access_token, _) = self.connection_info();
+            let url = format!("{}{}", base_url, path);
+            let mut req = client.delete(&url);
+            if let Some(token) = access_token.as_deref() {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+
+            let resp = req.send().map_err(|e| ApiError::Network(e.to_string()))?;
             let status = resp.status();
 
             if status.is_success() {
