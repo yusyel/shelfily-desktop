@@ -48,6 +48,7 @@ pub enum LibrarySortMode {
     NewlyAdded,
     AuthorAsc,
     TitleAsc,
+    RecentlyPlayed,
 }
 
 mod imp {
@@ -71,9 +72,10 @@ mod imp {
         pub detail_content: RefCell<Option<gtk::Box>>,
         pub detail_top_box: RefCell<Option<gtk::Box>>,
         pub detail_cover_image: RefCell<Option<gtk::Image>>,
-        pub detail_play_content: RefCell<Option<adw::ButtonContent>>,
+        pub detail_play_btn: RefCell<Option<gtk::Button>>,
         pub detail_play_item_id: RefCell<Option<String>>,
-        pub detail_play_default_label: RefCell<String>,
+        pub chapter_indicators: RefCell<Vec<(f64, f64, gtk::Box)>>,
+        pub detail_is_finished: Rc<Cell<bool>>,
         // Persistent bottom player bar
         pub player_bar: gtk::ActionBar,
         pub player_title: gtk::Label,
@@ -97,6 +99,8 @@ mod imp {
         // OAuth
         pub oauth_consumed: RefCell<bool>,
         pub compact_mode: Cell<bool>,
+        pub toast_overlay: adw::ToastOverlay,
+        pub nav_view: RefCell<Option<adw::NavigationView>>,
     }
 
     impl Default for ShelfilyDesktopWindow {
@@ -124,9 +128,10 @@ mod imp {
                 detail_content: RefCell::new(None),
                 detail_top_box: RefCell::new(None),
                 detail_cover_image: RefCell::new(None),
-                detail_play_content: RefCell::new(None),
+                detail_play_btn: RefCell::new(None),
                 detail_play_item_id: RefCell::new(None),
-                detail_play_default_label: RefCell::new(String::from("Start Listening")),
+                chapter_indicators: RefCell::new(Vec::new()),
+                detail_is_finished: Rc::new(Cell::new(false)),
                 player_bar,
                 player_title: gtk::Label::new(None),
                 player_author: gtk::Label::new(None),
@@ -147,6 +152,8 @@ mod imp {
                 progress_source: RefCell::new(None),
                 oauth_consumed: RefCell::new(false),
                 compact_mode: Cell::new(false),
+                toast_overlay: adw::ToastOverlay::new(),
+                nav_view: RefCell::new(None),
             }
         }
     }
@@ -412,12 +419,19 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         let login_page = self.build_login_page();
         let loading_page = self.build_loading_page();
         let library_page = self.build_library_page();
-        let detail_page = self.build_detail_page();
+
+        let nav_view = adw::NavigationView::new();
+        let lib_nav_page = adw::NavigationPage::builder()
+            .title("Shelfily")
+            .tag("library")
+            .child(&library_page)
+            .build();
+        nav_view.add(&lib_nav_page);
+        *imp.nav_view.borrow_mut() = Some(nav_view.clone());
 
         imp.stack.add_named(&login_page, Some("login"));
         imp.stack.add_named(&loading_page, Some("loading"));
-        imp.stack.add_named(&library_page, Some("library"));
-        imp.stack.add_named(&detail_page, Some("detail"));
+        imp.stack.add_named(&nav_view, Some("library"));
         imp.stack.set_visible_child_name(if self.has_saved_session_candidate() {
             "loading"
         } else {
@@ -434,7 +448,8 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         main_box.append(&imp.stack);
         main_box.append(&imp.player_bar);
 
-        self.set_content(Some(&main_box));
+        imp.toast_overlay.set_child(Some(&main_box));
+        self.set_content(Some(&imp.toast_overlay));
         self.install_resize_observer();
 
         // Try auto-login from saved credentials
@@ -458,35 +473,73 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         provider.load_from_string(
             "
             .shelfily-window { background: @window_bg_color; }
-            .app-root { padding: 6px; }
+            .app-root { }
             .player-bar {
-                margin: 8px 10px 10px 10px;
-                border-radius: 14px;
-                padding: 8px 10px;
+                margin: 6px 12px 12px 12px;
+                border-radius: 18px;
+                padding: 8px 14px;
                 background: @card_bg_color;
-                border: 1px solid @borders;
+                border: 1px solid alpha(@borders, 0.5);
             }
             .book-card {
-                padding: 10px;
-                border-radius: 12px;
+                padding: 8px;
+                border-radius: 14px;
                 background: @card_bg_color;
-                border: 1px solid @borders;
+                border: 1px solid alpha(@borders, 0.6);
+                transition: border-color 150ms ease;
             }
             .book-card:hover {
-                background: @card_bg_color;
-                border-color: @accent_bg_color;
+                border-color: @accent_color;
             }
             .book-cover-frame { border-radius: 10px; }
-            .login-surface {
-                border-radius: 16px;
-                padding: 18px;
-                background: @card_bg_color;
-                border: 1px solid @borders;
+            .cover-play-btn {
+                transition: opacity 200ms ease;
             }
-            .compact .app-root { padding: 2px; }
-            .compact .player-bar { margin: 4px 4px 6px 4px; border-radius: 10px; padding: 6px; }
-            .compact .book-card { padding: 6px; }
-            .compact .login-surface { padding: 10px; border-radius: 12px; }
+            .detail-play-btn {
+                min-width: 64px;
+                min-height: 64px;
+            }
+            .seek-scale trough {
+                min-height: 4px;
+                border-radius: 4px;
+                transition: min-height 150ms ease;
+            }
+            .seek-scale:hover trough {
+                min-height: 8px;
+            }
+            .seek-scale slider {
+                opacity: 0;
+                transition: opacity 150ms ease;
+            }
+            .seek-scale:hover slider {
+                opacity: 1;
+            }
+            .chapter-indicator {
+                min-width: 10px;
+                min-height: 10px;
+                border-radius: 999px;
+                background-color: alpha(@window_fg_color, 0.15);
+            }
+            .chapter-indicator.completed {
+                background-color: @success_color;
+            }
+            .chapter-indicator.playing {
+                background-color: @accent_color;
+                box-shadow: 0 0 0 4px alpha(@accent_color, 0.25);
+            }
+            .chapter-indicator.unplayed {
+                background-color: transparent;
+                box-shadow: inset 0 0 0 1.5px alpha(@window_fg_color, 0.35);
+            }
+            .login-surface {
+                border-radius: 18px;
+                padding: 20px;
+                background: @card_bg_color;
+                border: 1px solid alpha(@borders, 0.5);
+            }
+            .compact .player-bar { margin: 4px 6px 8px 6px; border-radius: 12px; padding: 6px 10px; }
+            .compact .book-card { padding: 6px; border-radius: 10px; }
+            .compact .login-surface { padding: 12px; border-radius: 14px; }
             ",
         );
         gtk::style_context_add_provider_for_display(
@@ -592,7 +645,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         }
 
         self.write_stored_session(&session);
-        log::info!("Oturum bilgileri kaydedildi");
+        log::info!("Session credentials saved");
     }
 
     fn try_restore_session(&self) {
@@ -766,6 +819,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         imp.duration_label.add_css_class("dim-label");
         imp.duration_label.set_width_chars(6);
 
+        imp.position_scale.add_css_class("seek-scale");
         progress_row.append(&imp.position_label);
         progress_row.append(&imp.position_scale);
         progress_row.append(&imp.duration_label);
@@ -793,6 +847,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         self.imp().player_bar.set_revealed(false);
     }
 
+
     fn update_player_info(&self, title: &str, author: &str, duration: f64, current: f64) {
         let imp = self.imp();
         imp.player_title.set_text(title);
@@ -805,6 +860,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         imp.updating_slider.set(false);
         *imp.duration.borrow_mut() = duration;
         *imp.current_time.borrow_mut() = current;
+        self.refresh_chapter_indicators(current);
     }
 
     fn update_play_pause_icon(&self, playing: bool) {
@@ -816,22 +872,46 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         self.imp().play_pause_btn.set_icon_name(icon);
     }
 
+    fn apply_chapter_indicators(&self, current_time: f64) {
+        let imp = self.imp();
+        let force_finished = imp.detail_is_finished.get();
+        for (start, end, indicator) in imp.chapter_indicators.borrow().iter() {
+            indicator.remove_css_class("completed");
+            indicator.remove_css_class("playing");
+            indicator.remove_css_class("unplayed");
+            if force_finished || current_time >= *end {
+                indicator.add_css_class("completed");
+            } else if current_time >= *start && current_time < *end {
+                indicator.add_css_class("playing");
+            } else {
+                indicator.add_css_class("unplayed");
+            }
+        }
+    }
+
+    fn refresh_chapter_indicators(&self, current_time: f64) {
+        let imp = self.imp();
+        let detail_is_current = imp.detail_play_item_id.borrow().as_deref()
+            == imp.current_item_id.borrow().as_deref();
+        if !detail_is_current {
+            return;
+        }
+        self.apply_chapter_indicators(current_time);
+    }
+
     fn refresh_detail_play_button(&self) {
         let imp = self.imp();
         let detail_item_id = imp.detail_play_item_id.borrow().clone();
         let current_item_id = imp.current_item_id.borrow().clone();
         let is_current_item = detail_item_id.is_some() && detail_item_id == current_item_id;
         let is_playing_current = is_current_item && imp.is_playing.get();
-        let default_label = imp.detail_play_default_label.borrow().clone();
 
-        if let Some(content) = imp.detail_play_content.borrow().as_ref() {
-            if is_playing_current {
-                content.set_icon_name("media-playback-pause-symbolic");
-                content.set_label("Durdur");
+        if let Some(btn) = imp.detail_play_btn.borrow().as_ref() {
+            btn.set_icon_name(if is_playing_current {
+                "media-playback-pause-symbolic"
             } else {
-                content.set_icon_name("media-playback-start-symbolic");
-                content.set_label(&default_label);
-            }
+                "media-playback-start-symbolic"
+            });
         }
     }
 
@@ -892,34 +972,16 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         header.set_title_widget(Some(&adw::WindowTitle::new("Shelfily Desktop", "")));
         toolbar_view.add_top_bar(&header);
 
-        let clamp = adw::Clamp::new();
-        clamp.set_maximum_size(400);
+        let status = adw::StatusPage::new();
+        status.set_icon_name(Some("audio-headphones-symbolic"));
+        status.set_title("Restoring Session");
+        status.set_description(Some("Checking your saved login..."));
 
-        let main_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
-        main_box.add_css_class("login-surface");
-        main_box.set_valign(gtk::Align::Center);
-        main_box.set_halign(gtk::Align::Center);
-        main_box.set_margin_start(24);
-        main_box.set_margin_end(24);
-        main_box.set_margin_top(24);
-        main_box.set_margin_bottom(24);
+        let spinner = adw::Spinner::new();
+        spinner.set_size_request(32, 32);
+        status.set_child(Some(&spinner));
 
-        let spinner = gtk::Spinner::new();
-        spinner.set_spinning(true);
-        spinner.set_size_request(48, 48);
-        main_box.append(&spinner);
-
-        let title = gtk::Label::new(Some("Restoring session"));
-        title.add_css_class("title-3");
-        main_box.append(&title);
-
-        let subtitle = gtk::Label::new(Some("Checking your saved login..."));
-        subtitle.add_css_class("dim-label");
-        main_box.append(&subtitle);
-
-        clamp.set_child(Some(&main_box));
-        toolbar_view.set_content(Some(&clamp));
-
+        toolbar_view.set_content(Some(&status));
         toolbar_view.upcast()
     }
 
@@ -1345,6 +1407,11 @@ the session may expire and require signing in again"
         self.stop_playback();
         self.hide_player();
 
+        // Reset NavigationView to library root before switching to login
+        if let Some(nav_view) = self.imp().nav_view.borrow().as_ref() {
+            while nav_view.pop() {}
+        }
+
         self.clear_stored_session();
 
         self.imp().stack.set_visible_child_name("login");
@@ -1359,30 +1426,22 @@ the session may expire and require signing in again"
             flowbox.remove(&child);
         }
 
-        let error_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        error_box.set_valign(gtk::Align::Center);
-        error_box.set_halign(gtk::Align::Center);
-        error_box.set_vexpand(true);
-
-        let icon = gtk::Image::from_icon_name("dialog-error-symbolic");
-        icon.set_pixel_size(48);
-        icon.add_css_class("dim-label");
-        error_box.append(&icon);
-
-        let label = gtk::Label::new(Some(message));
-        label.add_css_class("dim-label");
-        label.set_wrap(true);
-        error_box.append(&label);
+        let status = adw::StatusPage::new();
+        status.set_icon_name(Some("dialog-error-symbolic"));
+        status.set_title("Could Not Load Library");
+        status.set_description(Some(message));
+        status.set_vexpand(true);
 
         let retry_btn = gtk::Button::with_label("Try Again");
         retry_btn.add_css_class("pill");
+        retry_btn.add_css_class("suggested-action");
         let win = self.clone();
         retry_btn.connect_clicked(move |_| {
             win.load_library();
         });
-        error_box.append(&retry_btn);
+        status.set_child(Some(&retry_btn));
 
-        flowbox.append(&error_box);
+        flowbox.append(&status);
         self.set_library_loading(false);
     }
 
@@ -1440,6 +1499,18 @@ the session may expire and require signing in again"
             win.render_continue_listening();
         });
         sort_box.append(&sort_title_btn);
+
+        let sort_played_btn = gtk::Button::with_label("Recently Played");
+        sort_played_btn.add_css_class("flat");
+        let win = self.clone();
+        sort_played_btn.connect_clicked(move |_| {
+            win.imp()
+                .library_sort_mode
+                .set(LibrarySortMode::RecentlyPlayed);
+            win.render_library();
+            win.render_continue_listening();
+        });
+        sort_box.append(&sort_played_btn);
 
         sort_popover.set_child(Some(&sort_box));
         sort_btn.set_popover(Some(&sort_popover));
@@ -1560,21 +1631,15 @@ the session may expire and require signing in again"
         toolbar_view.add_bottom_bar(&switcher_bar);
 
         // Loading overlay
-        let loading_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        loading_box.set_valign(gtk::Align::Center);
-        loading_box.set_halign(gtk::Align::Center);
-        loading_box.set_vexpand(true);
-        let loading_spinner = gtk::Spinner::new();
-        loading_spinner.set_spinning(true);
-        loading_spinner.set_width_request(32);
-        loading_spinner.set_height_request(32);
-        loading_box.append(&loading_spinner);
-        let loading_label = gtk::Label::new(Some("Loading books..."));
-        loading_label.add_css_class("dim-label");
-        loading_box.append(&loading_label);
+        let loading_status = adw::StatusPage::new();
+        loading_status.set_title("Loading Books");
+        loading_status.set_description(Some("Fetching your library..."));
+        let loading_spinner = adw::Spinner::new();
+        loading_spinner.set_size_request(32, 32);
+        loading_status.set_child(Some(&loading_spinner));
 
         let content_stack = gtk::Stack::new();
-        content_stack.add_named(&loading_box, Some("loading"));
+        content_stack.add_named(&loading_status, Some("loading"));
         content_stack.add_named(&view_stack, Some("content"));
         content_stack.set_visible_child_name("loading");
 
@@ -1705,6 +1770,9 @@ the session may expire and require signing in again"
                     )
                 });
             }
+            LibrarySortMode::RecentlyPlayed => {
+                items.sort_by_key(|item| Reverse(Self::item_last_played_timestamp(item)));
+            }
         }
 
         let query = imp.library_search_query.borrow().trim().to_lowercase();
@@ -1738,6 +1806,13 @@ the session may expire and require signing in again"
             .unwrap_or("")
     }
 
+    fn item_last_played_timestamp(item: &LibraryItem) -> u64 {
+        item.user_media_progress
+            .as_ref()
+            .and_then(|p| p.last_update)
+            .unwrap_or(0)
+    }
+
     fn item_added_timestamp(item: &LibraryItem) -> u64 {
         item.extra
             .as_ref()
@@ -1769,7 +1844,7 @@ the session may expire and require signing in again"
 
             match rx.recv().await {
                 Ok(Ok(items)) => {
-                    log::info!("Devam eden kitaplar: {}", items.len());
+                    log::info!("Continue listening items: {}", items.len());
                     let mut seen = HashSet::new();
                     let deduped: Vec<LibraryItem> = items
                         .iter()
@@ -1818,6 +1893,9 @@ the session may expire and require signing in again"
                     )
                 });
             }
+            LibrarySortMode::RecentlyPlayed => {
+                items.sort_by_key(|item| Reverse(Self::item_last_played_timestamp(item)));
+            }
         }
 
         let query = imp.library_search_query.borrow().trim().to_lowercase();
@@ -1835,18 +1913,12 @@ the session may expire and require signing in again"
         }
 
         if items.is_empty() {
-            let empty_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
-            empty_box.set_valign(gtk::Align::Center);
-            empty_box.set_halign(gtk::Align::Center);
-            empty_box.set_vexpand(true);
-            let icon = gtk::Image::from_icon_name("audio-headphones-symbolic");
-            icon.set_pixel_size(48);
-            icon.add_css_class("dim-label");
-            empty_box.append(&icon);
-            let label = gtk::Label::new(Some("No books in progress yet"));
-            label.add_css_class("dim-label");
-            empty_box.append(&label);
-            continue_flowbox.append(&empty_box);
+            let status = adw::StatusPage::new();
+            status.set_icon_name(Some("audio-headphones-symbolic"));
+            status.set_title("No Books in Progress");
+            status.set_description(Some("Start listening to a book to see it here"));
+            status.set_vexpand(true);
+            continue_flowbox.append(&status);
         }
     }
 
@@ -1907,7 +1979,35 @@ the session may expire and require signing in again"
         }
 
         cover_box.append(&bar_track);
-        cover_frame.set_child(Some(&cover_box));
+
+        // Gelly tarzı: overlay üzerinde hover'da beliren dairesel play butonu
+        let cover_overlay = gtk::Overlay::new();
+        cover_overlay.set_child(Some(&cover_box));
+
+        let hover_play = gtk::Button::from_icon_name("media-playback-start-symbolic");
+        hover_play.add_css_class("circular");
+        hover_play.add_css_class("suggested-action");
+        hover_play.add_css_class("cover-play-btn");
+        hover_play.set_halign(gtk::Align::Center);
+        hover_play.set_valign(gtk::Align::Center);
+        hover_play.set_opacity(0.0);
+        hover_play.set_size_request(48, 48);
+        cover_overlay.add_overlay(&hover_play);
+
+        let motion = gtk::EventControllerMotion::new();
+        let btn = hover_play.clone();
+        motion.connect_enter(move |_, _, _| btn.set_opacity(1.0));
+        let btn = hover_play.clone();
+        motion.connect_leave(move |_| btn.set_opacity(0.0));
+        cover_overlay.add_controller(motion);
+
+        let item_id_hover = item.id.clone();
+        let win_hover = self.clone();
+        hover_play.connect_clicked(move |_| {
+            win_hover.start_playback(&item_id_hover);
+        });
+
+        cover_frame.set_child(Some(&cover_overlay));
         card_box.append(&cover_frame);
 
         let title = item
@@ -1997,23 +2097,21 @@ the session may expire and require signing in again"
 
     // ─── DETAIL PAGE ───────────────────────────────────────────────────────
 
-    fn build_detail_page(&self) -> gtk::Widget {
-        let toolbar_view = adw::ToolbarView::new();
-        let header = adw::HeaderBar::new();
+    fn open_audiobook_detail(&self, item_id: &str) {
+        let imp = self.imp();
 
-        let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
-        back_btn.set_tooltip_text(Some("Back to Library"));
-        let win = self.clone();
-        back_btn.connect_clicked(move |_| {
-            win.imp().stack.set_visible_child_name("library");
-        });
-        header.pack_start(&back_btn);
-        header.set_title_widget(Some(&adw::WindowTitle::new("Book Details", "")));
+        let nav_view = match imp.nav_view.borrow().clone() {
+            Some(v) => v,
+            None => return,
+        };
 
-        toolbar_view.add_top_bar(&header);
+        // Pop back to library root (handles re-opening from detail page)
+        while nav_view.pop() {}
 
+        // Build detail content
         let scrolled = gtk::ScrolledWindow::new();
         scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+        scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
 
         let clamp = adw::Clamp::new();
         clamp.set_maximum_size(800);
@@ -2024,23 +2122,31 @@ the session may expire and require signing in again"
 
         let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 24);
         detail_box.set_valign(gtk::Align::Start);
-
         clamp.set_child(Some(&detail_box));
         scrolled.set_child(Some(&clamp));
+
+        let toolbar_view = adw::ToolbarView::new();
+        let header = adw::HeaderBar::new();
+        toolbar_view.add_top_bar(&header);
         toolbar_view.set_content(Some(&scrolled));
 
-        *self.imp().detail_content.borrow_mut() = Some(detail_box);
+        // Store widget refs before async fetch
+        *imp.detail_content.borrow_mut() = Some(detail_box);
+        *imp.detail_play_btn.borrow_mut() = None;
+        *imp.detail_play_item_id.borrow_mut() = Some(item_id.to_string());
+        *imp.detail_top_box.borrow_mut() = None;
+        *imp.detail_cover_image.borrow_mut() = None;
 
-        toolbar_view.upcast()
-    }
+        let detail_nav_page = adw::NavigationPage::builder()
+            .title("Yükleniyor...")
+            .child(&toolbar_view)
+            .build();
+        let detail_nav_page_ref = detail_nav_page.clone();
+        nav_view.push(&detail_nav_page);
 
-    fn open_audiobook_detail(&self, item_id: &str) {
-        let imp = self.imp();
         let client = imp.client.clone();
         let win = self.clone();
         let id = item_id.to_string();
-
-        imp.stack.set_visible_child_name("detail");
 
         glib::spawn_future_local(async move {
             let (tx, rx) = async_channel::bounded(1);
@@ -2053,6 +2159,13 @@ the session may expire and require signing in again"
 
             match rx.recv().await {
                 Ok(Ok(item)) => {
+                    let book_title = item
+                        .media
+                        .as_ref()
+                        .and_then(|m| m.metadata.as_ref())
+                        .and_then(|m| m.title.as_deref())
+                        .unwrap_or("Kitap Detayı");
+                    detail_nav_page_ref.set_title(book_title);
                     win.populate_detail(&item);
                 }
                 Ok(Err(e)) => {
@@ -2073,10 +2186,11 @@ the session may expire and require signing in again"
         while let Some(child) = detail_box.first_child() {
             detail_box.remove(&child);
         }
-        *imp.detail_play_content.borrow_mut() = None;
+        *imp.detail_play_btn.borrow_mut() = None;
         *imp.detail_play_item_id.borrow_mut() = Some(item.id.clone());
         *imp.detail_top_box.borrow_mut() = None;
         *imp.detail_cover_image.borrow_mut() = None;
+        imp.chapter_indicators.borrow_mut().clear();
 
         let metadata = item.media.as_ref().and_then(|m| m.metadata.as_ref());
 
@@ -2208,30 +2322,14 @@ the session may expire and require signing in again"
         detail_box.append(&top_box);
         self.apply_responsive_layout(self.width());
 
-        // Play button
-        let has_progress = item
-            .user_media_progress
-            .as_ref()
-            .and_then(|p| p.progress)
-            .unwrap_or(0.0)
-            > 0.0;
-
-        let play_button = gtk::Button::new();
-        let play_content = adw::ButtonContent::new();
-        play_content.set_icon_name("media-playback-start-symbolic");
-        let default_play_label = if has_progress {
-            "Continue"
-        } else {
-            "Start Listening"
-        };
-        play_content.set_label(default_play_label);
-        *imp.detail_play_default_label.borrow_mut() = default_play_label.to_string();
-        *imp.detail_play_content.borrow_mut() = Some(play_content.clone());
-        play_button.set_child(Some(&play_content));
+        // Play button (Gelly tarzı dairesel büyük buton)
+        let play_button = gtk::Button::from_icon_name("media-playback-start-symbolic");
         play_button.add_css_class("suggested-action");
-        play_button.add_css_class("pill");
-        play_button.set_height_request(48);
-        play_button.set_halign(gtk::Align::Start);
+        play_button.add_css_class("circular");
+        play_button.add_css_class("detail-play-btn");
+        play_button.set_size_request(64, 64);
+        play_button.set_valign(gtk::Align::Center);
+        *imp.detail_play_btn.borrow_mut() = Some(play_button.clone());
 
         let item_id = item.id.clone();
         let win = self.clone();
@@ -2246,7 +2344,108 @@ the session may expire and require signing in again"
                 win.start_playback(&item_id);
             }
         });
-        detail_box.append(&play_button);
+
+        // Mark as read/unread toggle button
+        let is_finished_init = item
+            .user_media_progress
+            .as_ref()
+            .and_then(|p| p.is_finished)
+            .unwrap_or(false);
+        let saved_progress_time = item
+            .user_media_progress
+            .as_ref()
+            .and_then(|p| p.current_time)
+            .unwrap_or(0.0);
+        imp.detail_is_finished.set(is_finished_init);
+
+        let mark_button = gtk::Button::new();
+        mark_button.add_css_class("pill");
+        mark_button.set_valign(gtk::Align::Center);
+        let mark_content = adw::ButtonContent::new();
+        mark_button.set_child(Some(&mark_content));
+
+        let mark_state = Rc::new(Cell::new(is_finished_init));
+        let apply_mark_visual = |state: bool, content: &adw::ButtonContent| {
+            if state {
+                content.set_icon_name("edit-undo-symbolic");
+                content.set_label("Mark as Unfinished");
+            } else {
+                content.set_icon_name("object-select-symbolic");
+                content.set_label("Mark as Finished");
+            }
+        };
+        apply_mark_visual(mark_state.get(), &mark_content);
+
+        let win_mark = self.clone();
+        let item_id_mark = item.id.clone();
+        let mark_state_cb = mark_state.clone();
+        let mark_button_cb = mark_button.clone();
+        let mark_content_cb = mark_content.clone();
+        mark_button.connect_clicked(move |_| {
+            let new_state = !mark_state_cb.get();
+            mark_button_cb.set_sensitive(false);
+            let (sender, receiver) = async_channel::bounded::<Result<(), String>>(1);
+            let client = win_mark.imp().client.clone();
+            let item_id = item_id_mark.clone();
+            std::thread::spawn(move || {
+                let result = client
+                    .update_progress(&item_id, new_state)
+                    .map_err(|e| e.to_string());
+                let _ = sender.send_blocking(result);
+            });
+            let win_recv = win_mark.clone();
+            let mark_button_recv = mark_button_cb.clone();
+            let mark_content_recv = mark_content_cb.clone();
+            let mark_state_recv = mark_state_cb.clone();
+            glib::spawn_future_local(async move {
+                match receiver.recv().await {
+                    Ok(Ok(())) => {
+                        mark_state_recv.set(new_state);
+                        win_recv.imp().detail_is_finished.set(new_state);
+                        if new_state {
+                            mark_content_recv.set_icon_name("edit-undo-symbolic");
+                            mark_content_recv.set_label("Mark as Unfinished");
+                        } else {
+                            mark_content_recv.set_icon_name("object-select-symbolic");
+                            mark_content_recv.set_label("Mark as Finished");
+                        }
+                        let imp_recv = win_recv.imp();
+                        let detail_is_current = imp_recv.detail_play_item_id.borrow().as_deref()
+                            == imp_recv.current_item_id.borrow().as_deref();
+                        let current = if detail_is_current {
+                            *imp_recv.current_time.borrow()
+                        } else {
+                            saved_progress_time
+                        };
+                        win_recv.apply_chapter_indicators(current);
+                        let toast = adw::Toast::new(if new_state {
+                            "Marked as finished"
+                        } else {
+                            "Marked as unfinished"
+                        });
+                        win_recv.imp().toast_overlay.add_toast(toast);
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("Update progress error: {}", err);
+                        let toast =
+                            adw::Toast::new(&format!("Failed to update progress: {}", err));
+                        win_recv.imp().toast_overlay.add_toast(toast);
+                    }
+                    Err(err) => {
+                        log::warn!("Update progress channel error: {}", err);
+                        let toast = adw::Toast::new("Failed to update progress");
+                        win_recv.imp().toast_overlay.add_toast(toast);
+                    }
+                }
+                mark_button_recv.set_sensitive(true);
+            });
+        });
+
+        let actions_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        actions_row.set_halign(gtk::Align::Start);
+        actions_row.append(&play_button);
+        actions_row.append(&mark_button);
+        detail_box.append(&actions_row);
         self.refresh_detail_play_button();
 
         // Description
@@ -2304,20 +2503,39 @@ the session may expire and require signing in again"
                     let row = adw::ActionRow::new();
                     row.set_title(ch_name);
                     row.set_subtitle(&format!("{} min {} sec", mins, secs));
-                    row.add_prefix(&gtk::Label::new(Some(&format!("{}", i + 1))));
 
-                    // Color based on progress
+                    let prefix_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+                    prefix_box.set_valign(gtk::Align::Center);
+
+                    let indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                    indicator.add_css_class("chapter-indicator");
+                    indicator.set_valign(gtk::Align::Center);
+                    indicator.set_halign(gtk::Align::Center);
+
                     if is_finished || listen_pos >= end {
-                        // Completed chapter — light green
-                        row.add_css_class("success");
-                    } else if listen_pos < start {
-                        // Not yet reached — light red
-                        row.add_css_class("error");
+                        indicator.add_css_class("completed");
+                    } else if listen_pos >= start && listen_pos < end {
+                        indicator.add_css_class("playing");
+                    } else {
+                        indicator.add_css_class("unplayed");
                     }
-                    // Currently playing chapter (start <= listen_pos < end) — default style
+
+                    let num_label = gtk::Label::new(Some(&format!("{:02}", i + 1)));
+                    num_label.add_css_class("dim-label");
+                    num_label.add_css_class("monospace");
+                    num_label.add_css_class("caption");
+
+                    prefix_box.append(&indicator);
+                    prefix_box.append(&num_label);
+                    row.add_prefix(&prefix_box);
+
+                    imp.chapter_indicators
+                        .borrow_mut()
+                        .push((start, end, indicator.clone()));
 
                     let ch_play = gtk::Button::from_icon_name("media-playback-start-symbolic");
                     ch_play.add_css_class("flat");
+                    ch_play.add_css_class("circular");
                     ch_play.set_valign(gtk::Align::Center);
                     let ch_start = start;
                     let item_id = item.id.clone();
@@ -2536,7 +2754,7 @@ the session may expire and require signing in again"
                     }
                     MessageView::Buffering(buffering) => {
                         let percent = buffering.percent();
-                        log::debug!("Tamponlama: {}%", percent);
+                        log::debug!("Buffering: {}%", percent);
                         if let Some(pipeline) = pipeline_weak.upgrade() {
                             if percent < 100 {
                                 if !is_buffering_clone.get() {
@@ -2566,7 +2784,7 @@ the session may expire and require signing in again"
                     _ => glib::ControlFlow::Continue,
                 }
             })
-            .expect("Bus watch eklenemedi");
+            .expect("Failed to add bus watch");
 
         *imp.bus_guard.borrow_mut() = Some(guard);
 
@@ -2599,6 +2817,7 @@ the session may expire and require signing in again"
                         imp.updating_slider.set(false);
                         imp.position_label.set_text(&format_time(secs));
                         *imp.current_time.borrow_mut() = secs;
+                        win.refresh_chapter_indicators(secs);
                     }
                 }
                 glib::ControlFlow::Continue
@@ -2631,7 +2850,7 @@ the session may expire and require signing in again"
 
                 std::thread::spawn(move || match client.sync_session(&sid, current, duration) {
                     Ok(_) => {
-                        log::debug!("Oturum senkronize edildi: {:.0}s", current)
+                        log::debug!("Session synced: {:.0}s", current)
                     }
                     Err(e) => {
                         log::warn!("Sync error: {}", e)

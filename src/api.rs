@@ -274,9 +274,7 @@ impl AudiobookshelfClient {
             "duration": duration,
             "timeListened": 1.0,
         });
-        let _: serde_json::Value =
-            self.post(&format!("/api/session/{}/sync", session_id), &body)?;
-        Ok(())
+        self.execute_empty_post(&format!("/api/session/{}/sync", session_id), &body)
     }
 
     /// POST /api/session/:id/close
@@ -346,6 +344,14 @@ impl AudiobookshelfClient {
             }
             return Err(ApiError::Server(format!("HTTP {}", status)));
         }
+    }
+
+    /// PATCH /api/me/progress/:id — mark an item as finished or unfinished
+    pub fn update_progress(&self, item_id: &str, finished: bool) -> Result<(), ApiError> {
+        let body = serde_json::json!({
+            "isFinished": finished,
+        });
+        self.execute_empty_patch(&format!("/api/me/progress/{}", item_id), &body)
     }
 
     /// Helper: extract base_url, token, and client clone from the inner lock
@@ -505,6 +511,43 @@ impl AudiobookshelfClient {
             if status.is_success() {
                 let bytes = resp.bytes().map_err(|e| ApiError::Network(e.to_string()))?;
                 return Ok(bytes.to_vec());
+            }
+
+            if (status.as_u16() == 401 || status.as_u16() == 403) && !attempted_refresh {
+                attempted_refresh = true;
+                if self.refresh_access_token()? {
+                    continue;
+                }
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(ApiError::Auth(format!("HTTP {}", status)));
+            }
+
+            return Err(ApiError::Server(format!("HTTP {}", status)));
+        }
+    }
+
+    fn execute_empty_patch(&self, path: &str, body: &serde_json::Value) -> Result<(), ApiError> {
+        let mut attempted_refresh = false;
+
+        loop {
+            let (client, base_url, access_token, _) = self.connection_info();
+            let url = format!("{}{}", base_url, path);
+            let mut req = client.patch(&url);
+            if let Some(token) = access_token.as_deref() {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+
+            let resp = req
+                .json(body)
+                .send()
+                .map_err(|e| ApiError::Network(e.to_string()))?;
+            let status = resp.status();
+
+            if status.is_success() {
+                return Ok(());
             }
 
             if (status.as_u16() == 401 || status.as_u16() == 403) && !attempted_refresh {
