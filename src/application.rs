@@ -36,10 +36,17 @@ mod imp {
             let obj = self.obj();
             obj.setup_gactions();
             obj.set_accels_for_action("app.quit", &["<primary>q"]);
+            obj.set_accels_for_action("app.preferences", &["<primary>comma"]);
         }
     }
 
     impl ApplicationImpl for ShelfilyDesktopApplication {
+        fn startup(&self) {
+            self.parent_startup();
+            // libadwaita is initialized by parent_startup(); now StyleManager is safe.
+            apply_color_scheme(&load_theme());
+        }
+
         fn activate(&self) {
             let application = self.obj();
             let window = application.active_window().unwrap_or_else(|| {
@@ -78,7 +85,54 @@ impl ShelfilyDesktopApplication {
         let logout_action = gio::ActionEntry::builder("logout")
             .activate(move |app: &Self, _, _| app.do_logout())
             .build();
-        self.add_action_entries([quit_action, about_action, logout_action]);
+        let preferences_action = gio::ActionEntry::builder("preferences")
+            .activate(move |app: &Self, _, _| app.show_preferences())
+            .build();
+        self.add_action_entries([
+            quit_action,
+            about_action,
+            logout_action,
+            preferences_action,
+        ]);
+    }
+
+    fn show_preferences(&self) {
+        let window = self.active_window();
+
+        let dialog = adw::PreferencesDialog::new();
+        dialog.set_title("Preferences");
+
+        let page = adw::PreferencesPage::new();
+        page.set_title("General");
+        page.set_icon_name(Some("preferences-system-symbolic"));
+
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Appearance");
+
+        let model = gtk::StringList::new(&["Follow system", "Light", "Dark"]);
+        let combo = adw::ComboRow::new();
+        combo.set_title("Theme");
+        combo.set_subtitle("Choose the application color scheme");
+        combo.set_model(Some(&model));
+        combo.set_selected(match load_theme().as_str() {
+            "light" => 1,
+            "dark" => 2,
+            _ => 0,
+        });
+        combo.connect_selected_notify(|combo| {
+            let theme = match combo.selected() {
+                1 => "light",
+                2 => "dark",
+                _ => "system",
+            };
+            save_theme(theme);
+            apply_color_scheme(theme);
+        });
+        group.add(&combo);
+
+        page.add(&group);
+        dialog.add(&page);
+        dialog.present(window.as_ref());
     }
 
     fn show_about(&self) {
@@ -106,4 +160,38 @@ impl ShelfilyDesktopApplication {
             }
         }
     }
+}
+
+fn theme_file_path() -> std::path::PathBuf {
+    let mut path = glib::user_config_dir();
+    path.push("shelfily-desktop");
+    path.push("theme");
+    path
+}
+
+fn load_theme() -> String {
+    std::fs::read_to_string(theme_file_path())
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| matches!(s.as_str(), "light" | "dark" | "system"))
+        .unwrap_or_else(|| "system".to_string())
+}
+
+fn save_theme(theme: &str) {
+    let path = theme_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, theme) {
+        log::warn!("Failed to save theme preference: {}", e);
+    }
+}
+
+fn apply_color_scheme(theme: &str) {
+    let scheme = match theme {
+        "light" => adw::ColorScheme::ForceLight,
+        "dark" => adw::ColorScheme::ForceDark,
+        _ => adw::ColorScheme::Default,
+    };
+    adw::StyleManager::default().set_color_scheme(scheme);
 }

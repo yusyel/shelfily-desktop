@@ -74,7 +74,9 @@ mod imp {
         pub detail_cover_image: RefCell<Option<gtk::Image>>,
         pub detail_play_btn: RefCell<Option<gtk::Button>>,
         pub detail_play_item_id: RefCell<Option<String>>,
-        pub chapter_indicators: RefCell<Vec<(f64, f64, gtk::Box)>>,
+        pub chapter_indicators: RefCell<Vec<(f64, f64, gtk::Box, adw::ActionRow)>>,
+        pub np_chapter_indicators: RefCell<Vec<(f64, f64, gtk::Box, adw::ActionRow)>>,
+        pub np_chapters_container: RefCell<Option<gtk::Box>>,
         pub detail_is_finished: Rc<Cell<bool>>,
         pub bookmarks: RefCell<Vec<Bookmark>>,
         pub bookmarks_group: RefCell<Option<adw::PreferencesGroup>>,
@@ -83,6 +85,26 @@ mod imp {
         pub all_bookmarks: RefCell<Vec<Bookmark>>,
         pub bookmarks_list_box: RefCell<Option<gtk::Box>>,
         pub bookmarks_tab_empty: RefCell<Option<adw::StatusPage>>,
+        // Now Playing
+        pub now_playing_cover: RefCell<Option<gtk::Image>>,
+        pub now_playing_title: RefCell<Option<gtk::Label>>,
+        pub now_playing_author: RefCell<Option<gtk::Label>>,
+        pub now_playing_chapter: RefCell<Option<gtk::Label>>,
+        pub now_playing_position_scale: RefCell<Option<gtk::Scale>>,
+        pub now_playing_position_label: RefCell<Option<gtk::Label>>,
+        pub now_playing_duration_label: RefCell<Option<gtk::Label>>,
+        pub now_playing_play_btn: RefCell<Option<gtk::Button>>,
+        pub now_playing_speed_btn: RefCell<Option<gtk::MenuButton>>,
+        pub now_playing_sleep_btn: RefCell<Option<gtk::MenuButton>>,
+        pub now_playing_bg_provider: RefCell<Option<gtk::CssProvider>>,
+        pub now_playing_open: Rc<Cell<bool>>,
+        pub current_speed: Cell<f64>,
+        pub seek_settle_target: Cell<f64>,
+        pub seek_settle_ticks: Cell<u8>,
+        pub np_current_chapter_start: Cell<f64>,
+        pub sleep_timer_source: RefCell<Option<glib::SourceId>>,
+        pub sleep_until_chapter_end: Rc<Cell<bool>>,
+        pub sleep_remaining_secs: Rc<Cell<i64>>,
         // Persistent bottom player bar
         pub player_bar: gtk::ActionBar,
         pub player_title: gtk::Label,
@@ -119,6 +141,8 @@ mod imp {
 
             let player_bar = gtk::ActionBar::new();
             player_bar.set_revealed(false);
+            // Hidden entirely until playback starts so no empty styled bar shows.
+            player_bar.set_visible(false);
 
             Self {
                 stack: gtk::Stack::new(),
@@ -138,6 +162,8 @@ mod imp {
                 detail_play_btn: RefCell::new(None),
                 detail_play_item_id: RefCell::new(None),
                 chapter_indicators: RefCell::new(Vec::new()),
+                np_chapter_indicators: RefCell::new(Vec::new()),
+                np_chapters_container: RefCell::new(None),
                 detail_is_finished: Rc::new(Cell::new(false)),
                 bookmarks: RefCell::new(Vec::new()),
                 bookmarks_group: RefCell::new(None),
@@ -146,6 +172,25 @@ mod imp {
                 all_bookmarks: RefCell::new(Vec::new()),
                 bookmarks_list_box: RefCell::new(None),
                 bookmarks_tab_empty: RefCell::new(None),
+                now_playing_cover: RefCell::new(None),
+                now_playing_title: RefCell::new(None),
+                now_playing_author: RefCell::new(None),
+                now_playing_chapter: RefCell::new(None),
+                now_playing_position_scale: RefCell::new(None),
+                now_playing_position_label: RefCell::new(None),
+                now_playing_duration_label: RefCell::new(None),
+                now_playing_play_btn: RefCell::new(None),
+                now_playing_speed_btn: RefCell::new(None),
+                now_playing_sleep_btn: RefCell::new(None),
+                now_playing_bg_provider: RefCell::new(None),
+                now_playing_open: Rc::new(Cell::new(false)),
+                current_speed: Cell::new(1.0),
+                seek_settle_target: Cell::new(-1.0),
+                seek_settle_ticks: Cell::new(0),
+                np_current_chapter_start: Cell::new(0.0),
+                sleep_timer_source: RefCell::new(None),
+                sleep_until_chapter_end: Rc::new(Cell::new(false)),
+                sleep_remaining_secs: Rc::new(Cell::new(0)),
                 player_bar,
                 player_title: gtk::Label::new(None),
                 player_author: gtk::Label::new(None),
@@ -517,6 +562,48 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 background-color: @accent_color;
                 min-height: 8px;
             }
+            .player-close-btn {
+                background: alpha(@window_fg_color, 0.08);
+                color: @window_fg_color;
+                border: none;
+                min-width: 32px;
+                min-height: 32px;
+                padding: 0;
+                transition: background 150ms ease, color 150ms ease;
+            }
+            .player-close-btn:hover {
+                background: alpha(@destructive_color, 0.85);
+                color: white;
+            }
+            .player-close-btn:active {
+                background: @destructive_color;
+            }
+            .now-playing-bg {
+                background: @window_bg_color;
+            }
+            .now-playing-cover {
+                border-radius: 18px;
+                box-shadow: 0 24px 48px alpha(black, 0.5);
+            }
+            .now-playing-cover image {
+                border-radius: 18px;
+            }
+            .np-play-btn {
+                padding: 0;
+            }
+            .np-skip-btn {
+                background: alpha(@window_fg_color, 0.08);
+            }
+            .np-skip-btn:hover {
+                background: alpha(@window_fg_color, 0.16);
+            }
+            .np-scale trough {
+                min-height: 4px;
+                border-radius: 4px;
+            }
+            .np-scale:hover trough {
+                min-height: 6px;
+            }
             .detail-play-btn {
                 min-width: 64px;
                 min-height: 64px;
@@ -552,6 +639,11 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             .chapter-indicator.unplayed {
                 background-color: transparent;
                 box-shadow: inset 0 0 0 1.5px alpha(@window_fg_color, 0.35);
+            }
+            .chapter-row-playing {
+                background: transparent;
+                border-left: 3px solid alpha(@window_fg_color, 0.45);
+                transition: border-left-color 200ms ease, color 200ms ease;
             }
             .login-surface {
                 border-radius: 18px;
@@ -791,6 +883,13 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         let start_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         start_box.append(&imp.player_cover);
         start_box.append(&info_box);
+        start_box.set_cursor_from_name(Some("pointer"));
+        let gesture = gtk::GestureClick::new();
+        let win_np = self.clone();
+        gesture.connect_released(move |_, _, _, _| {
+            win_np.open_now_playing();
+        });
+        start_box.add_controller(gesture);
         imp.player_bar.pack_start(&start_box);
 
         // Center: controls + progress
@@ -856,6 +955,22 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         progress_row.append(&imp.duration_label);
         center_box.append(&progress_row);
 
+        // Close button (stop playback and hide player bar)
+        // Added FIRST via pack_end so it lands on the far right of the bar.
+        let close_btn = gtk::Button::from_icon_name("window-close-symbolic");
+        close_btn.add_css_class("circular");
+        close_btn.add_css_class("player-close-btn");
+        close_btn.set_tooltip_text(Some("Close player"));
+        close_btn.set_valign(gtk::Align::Center);
+        close_btn.set_size_request(32, 32);
+        let win = self.clone();
+        close_btn.connect_clicked(move |_| {
+            win.stop_playback();
+            win.hide_player();
+            win.refresh_detail_play_button();
+        });
+        imp.player_bar.pack_end(&close_btn);
+
         imp.player_bar.pack_end(&center_box);
 
         // Connect seek handler (user-only)
@@ -871,11 +986,15 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
     }
 
     fn reveal_player(&self) {
-        self.imp().player_bar.set_revealed(true);
+        let bar = &self.imp().player_bar;
+        bar.set_visible(true);
+        bar.set_revealed(true);
     }
 
     fn hide_player(&self) {
-        self.imp().player_bar.set_revealed(false);
+        let bar = &self.imp().player_bar;
+        bar.set_revealed(false);
+        bar.set_visible(false);
     }
 
 
@@ -892,6 +1011,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         *imp.duration.borrow_mut() = duration;
         *imp.current_time.borrow_mut() = current;
         self.refresh_chapter_indicators(current);
+        self.refresh_now_playing_info();
     }
 
     fn update_play_pause_icon(&self, playing: bool) {
@@ -901,23 +1021,36 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             "media-playback-start-symbolic"
         };
         self.imp().play_pause_btn.set_icon_name(icon);
+        if let Some(btn) = self.imp().now_playing_play_btn.borrow().as_ref() {
+            btn.set_icon_name(icon);
+        }
+    }
+
+    fn style_chapter_rows(
+        rows: &[(f64, f64, gtk::Box, adw::ActionRow)],
+        current_time: f64,
+        force_finished: bool,
+    ) {
+        for (start, end, indicator, row) in rows.iter() {
+            indicator.remove_css_class("completed");
+            indicator.remove_css_class("playing");
+            indicator.remove_css_class("unplayed");
+            row.remove_css_class("chapter-row-playing");
+            if force_finished || current_time >= *end {
+                indicator.add_css_class("completed");
+            } else if current_time >= *start && current_time < *end {
+                indicator.add_css_class("playing");
+                row.add_css_class("chapter-row-playing");
+            } else {
+                indicator.add_css_class("unplayed");
+            }
+        }
     }
 
     fn apply_chapter_indicators(&self, current_time: f64) {
         let imp = self.imp();
         let force_finished = imp.detail_is_finished.get();
-        for (start, end, indicator) in imp.chapter_indicators.borrow().iter() {
-            indicator.remove_css_class("completed");
-            indicator.remove_css_class("playing");
-            indicator.remove_css_class("unplayed");
-            if force_finished || current_time >= *end {
-                indicator.add_css_class("completed");
-            } else if current_time >= *start && current_time < *end {
-                indicator.add_css_class("playing");
-            } else {
-                indicator.add_css_class("unplayed");
-            }
-        }
+        Self::style_chapter_rows(&imp.chapter_indicators.borrow(), current_time, force_finished);
     }
 
     fn show_author_books(&self, author_id: Option<&str>, author_name: &str) {
@@ -1059,12 +1192,27 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
 
     fn refresh_chapter_indicators(&self, current_time: f64) {
         let imp = self.imp();
+        let force_finished = imp.detail_is_finished.get();
+
+        // Detail page rows: only reflect playback when the detail shows the playing item.
         let detail_is_current = imp.detail_play_item_id.borrow().as_deref()
             == imp.current_item_id.borrow().as_deref();
-        if !detail_is_current {
-            return;
+        if detail_is_current {
+            Self::style_chapter_rows(
+                &imp.chapter_indicators.borrow(),
+                current_time,
+                force_finished,
+            );
         }
-        self.apply_chapter_indicators(current_time);
+
+        // Now Playing rows always track the active playback while the page is open.
+        if imp.now_playing_open.get() {
+            Self::style_chapter_rows(
+                &imp.np_chapter_indicators.borrow(),
+                current_time,
+                force_finished,
+            );
+        }
     }
 
     // ─── BOOKMARKS ──────────────────────────────────────────────────────────
@@ -1601,6 +1749,806 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         }
     }
 
+    fn open_now_playing(&self) {
+        let imp = self.imp();
+        let nav_view = match imp.nav_view.borrow().clone() {
+            Some(v) => v,
+            None => return,
+        };
+        if imp.current_item_id.borrow().is_none() {
+            return;
+        }
+        if imp.now_playing_open.get() {
+            return;
+        }
+
+        let bg_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        bg_box.add_css_class("now-playing-bg");
+        bg_box.set_hexpand(true);
+        bg_box.set_vexpand(true);
+
+        // Fixed top section (cover + controls) stays put; chapters scroll below.
+        let clamp = adw::Clamp::new();
+        clamp.set_maximum_size(560);
+        // Extra top margin clears the transparent header that now overlays the content
+        clamp.set_margin_top(72);
+        clamp.set_margin_bottom(12);
+        clamp.set_margin_start(24);
+        clamp.set_margin_end(24);
+
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 24);
+        column.set_halign(gtk::Align::Center);
+
+        // Large cover
+        let cover_frame = gtk::Frame::new(None);
+        cover_frame.add_css_class("now-playing-cover");
+        cover_frame.set_halign(gtk::Align::Center);
+        let cover_image = gtk::Image::from_icon_name("audio-x-generic-symbolic");
+        cover_image.set_pixel_size(320);
+        cover_image.set_size_request(320, 320);
+        cover_frame.set_child(Some(&cover_image));
+        column.append(&cover_frame);
+
+        // Title + author + chapter
+        let text_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        text_box.set_halign(gtk::Align::Center);
+
+        let title_label = gtk::Label::new(None);
+        title_label.add_css_class("title-2");
+        title_label.set_halign(gtk::Align::Center);
+        title_label.set_justify(gtk::Justification::Center);
+        title_label.set_wrap(true);
+        title_label.set_max_width_chars(40);
+        text_box.append(&title_label);
+
+        let author_label = gtk::Label::new(None);
+        author_label.add_css_class("body");
+        author_label.add_css_class("dim-label");
+        author_label.set_halign(gtk::Align::Center);
+        text_box.append(&author_label);
+
+        let chapter_label = gtk::Label::new(None);
+        chapter_label.add_css_class("caption");
+        chapter_label.add_css_class("dim-label");
+        chapter_label.set_halign(gtk::Align::Center);
+        text_box.append(&chapter_label);
+
+        column.append(&text_box);
+
+        // Position scale + labels
+        let pos_label = gtk::Label::new(Some("0:00"));
+        pos_label.add_css_class("caption");
+        pos_label.add_css_class("dim-label");
+        pos_label.set_width_chars(7);
+        let dur_label = gtk::Label::new(Some("0:00"));
+        dur_label.add_css_class("caption");
+        dur_label.add_css_class("dim-label");
+        dur_label.set_width_chars(7);
+
+        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+        scale.set_draw_value(false);
+        scale.set_hexpand(true);
+        scale.add_css_class("np-scale");
+
+        // The scale represents the CURRENT CHAPTER, not the whole book. The
+        // value is chapter-relative; seeks are mapped back to absolute time
+        // using the current chapter start.
+        let win_seek = self.clone();
+        scale.connect_change_value(move |_, _, value| {
+            if win_seek.imp().updating_slider.get() {
+                return glib::Propagation::Proceed;
+            }
+            let ch_start = win_seek.imp().np_current_chapter_start.get();
+            win_seek.seek_to(ch_start + value);
+            glib::Propagation::Proceed
+        });
+
+        let pos_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        pos_row.append(&pos_label);
+        pos_row.append(&scale);
+        pos_row.append(&dur_label);
+        column.append(&pos_row);
+
+        // Skip + play row
+        let main_controls = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        main_controls.set_halign(gtk::Align::Center);
+
+        let back_btn = gtk::Button::from_icon_name("media-seek-backward-symbolic");
+        back_btn.add_css_class("circular");
+        back_btn.add_css_class("np-skip-btn");
+        back_btn.set_size_request(56, 56);
+        back_btn.set_tooltip_text(Some("Back 30 seconds"));
+        let win = self.clone();
+        back_btn.connect_clicked(move |_| win.seek_relative(-30));
+        main_controls.append(&back_btn);
+
+        let play_btn = gtk::Button::from_icon_name("media-playback-start-symbolic");
+        play_btn.add_css_class("circular");
+        play_btn.add_css_class("suggested-action");
+        play_btn.add_css_class("np-play-btn");
+        play_btn.set_size_request(72, 72);
+        let win = self.clone();
+        play_btn.connect_clicked(move |_| win.toggle_play_pause());
+        main_controls.append(&play_btn);
+
+        let fwd_btn = gtk::Button::from_icon_name("media-seek-forward-symbolic");
+        fwd_btn.add_css_class("circular");
+        fwd_btn.add_css_class("np-skip-btn");
+        fwd_btn.set_size_request(56, 56);
+        fwd_btn.set_tooltip_text(Some("Forward 30 seconds"));
+        let win = self.clone();
+        fwd_btn.connect_clicked(move |_| win.seek_relative(30));
+        main_controls.append(&fwd_btn);
+
+        column.append(&main_controls);
+
+        // Secondary controls: speed, sleep, bookmark
+        let secondary = gtk::Box::new(gtk::Orientation::Horizontal, 24);
+        secondary.set_halign(gtk::Align::Center);
+        secondary.set_margin_top(8);
+
+        let speed_btn = self.build_speed_menu_button();
+        secondary.append(&speed_btn);
+
+        let sleep_btn = self.build_sleep_menu_button();
+        secondary.append(&sleep_btn);
+
+        let bookmark_btn = gtk::Button::from_icon_name("bookmark-new-symbolic");
+        bookmark_btn.add_css_class("flat");
+        bookmark_btn.set_tooltip_text(Some("Bookmark current position"));
+        let win = self.clone();
+        bookmark_btn.connect_clicked(move |_| {
+            win.add_bookmark_at_current_position();
+        });
+        secondary.append(&bookmark_btn);
+
+        column.append(&secondary);
+
+        // Fixed top section
+        clamp.set_child(Some(&column));
+        bg_box.append(&clamp);
+
+        // Scrollable chapters section below the fixed cover/controls
+        let chapters_scrolled = gtk::ScrolledWindow::new();
+        chapters_scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+        chapters_scrolled.set_vexpand(true);
+        chapters_scrolled.set_propagate_natural_height(false);
+
+        let chapters_clamp = adw::Clamp::new();
+        chapters_clamp.set_maximum_size(560);
+        chapters_clamp.set_margin_start(24);
+        chapters_clamp.set_margin_end(24);
+        chapters_clamp.set_margin_bottom(24);
+
+        let chapters_container = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        chapters_container.set_visible(false);
+        chapters_clamp.set_child(Some(&chapters_container));
+        chapters_scrolled.set_child(Some(&chapters_clamp));
+        bg_box.append(&chapters_scrolled);
+        *imp.np_chapters_container.borrow_mut() = Some(chapters_container);
+
+        let toolbar_view = adw::ToolbarView::new();
+        let header = adw::HeaderBar::new();
+        header.add_css_class("flat");
+        header.add_css_class("now-playing-header");
+        toolbar_view.set_top_bar_style(adw::ToolbarStyle::Flat);
+        toolbar_view.set_extend_content_to_top_edge(true);
+        toolbar_view.add_top_bar(&header);
+        toolbar_view.set_content(Some(&bg_box));
+
+        let nav_page = adw::NavigationPage::builder()
+            .title("Now Playing")
+            .child(&toolbar_view)
+            .build();
+
+        // Hide the small bottom player while the big player is on screen
+        self.hide_player();
+
+        let open_flag = imp.now_playing_open.clone();
+        open_flag.set(true);
+        let win_hidden = self.clone();
+        nav_page.connect_hidden(move |_| {
+            open_flag.set(false);
+            win_hidden.imp().np_chapter_indicators.borrow_mut().clear();
+            *win_hidden.imp().np_chapters_container.borrow_mut() = None;
+            // Restore the small player bar if playback is still active
+            if win_hidden.imp().pipeline.borrow().is_some()
+                && win_hidden.imp().current_item_id.borrow().is_some()
+            {
+                win_hidden.reveal_player();
+            }
+        });
+
+        // Store refs
+        *imp.now_playing_cover.borrow_mut() = Some(cover_image);
+        *imp.now_playing_title.borrow_mut() = Some(title_label);
+        *imp.now_playing_author.borrow_mut() = Some(author_label);
+        *imp.now_playing_chapter.borrow_mut() = Some(chapter_label);
+        *imp.now_playing_position_scale.borrow_mut() = Some(scale);
+        *imp.now_playing_position_label.borrow_mut() = Some(pos_label);
+        *imp.now_playing_duration_label.borrow_mut() = Some(dur_label);
+        *imp.now_playing_play_btn.borrow_mut() = Some(play_btn);
+
+        nav_view.push(&nav_page);
+
+        self.refresh_now_playing_info();
+        self.update_play_pause_icon(imp.is_playing.get());
+
+        // Apply a default ambient color immediately so the page isn't flat
+        // until the cover loads. This also validates the CSS provider path.
+        self.apply_ambient_color(40, 50, 80);
+
+        // Fetch a high-quality cover and compute ambient bg from it.
+        if let Some(id) = imp.current_item_id.borrow().clone() {
+            self.load_now_playing_cover(&id);
+            self.load_now_playing_chapters(&id);
+        }
+    }
+
+    fn load_now_playing_chapters(&self, item_id: &str) {
+        let client = self.imp().client.clone();
+        let id = item_id.to_string();
+        let win = self.clone();
+        glib::spawn_future_local(async move {
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result = client.get_library_item(&id);
+                let _ = tx.send_blocking(result);
+            });
+            if let Ok(Ok(item)) = rx.recv().await {
+                win.populate_now_playing_chapters(&item);
+            }
+        });
+    }
+
+    fn populate_now_playing_chapters(&self, item: &LibraryItemExpanded) {
+        let imp = self.imp();
+        let container = match imp.np_chapters_container.borrow().clone() {
+            Some(c) => c,
+            None => return,
+        };
+
+        while let Some(child) = container.first_child() {
+            container.remove(&child);
+        }
+        imp.np_chapter_indicators.borrow_mut().clear();
+
+        let chapters = match item.media.as_ref().and_then(|m| m.chapters.as_ref()) {
+            Some(c) if !c.is_empty() => c,
+            _ => {
+                container.set_visible(false);
+                return;
+            }
+        };
+
+        let listen_pos = item
+            .user_media_progress
+            .as_ref()
+            .and_then(|p| p.current_time)
+            .unwrap_or(0.0);
+        let is_finished = item
+            .user_media_progress
+            .as_ref()
+            .and_then(|p| p.is_finished)
+            .unwrap_or(false);
+
+        let title = gtk::Label::new(Some("Chapters"));
+        title.add_css_class("title-4");
+        title.set_halign(gtk::Align::Start);
+        container.append(&title);
+
+        let group = adw::PreferencesGroup::new();
+        for (i, chapter) in chapters.iter().enumerate() {
+            let name = chapter.title.as_deref().unwrap_or("Chapter");
+            let start = chapter.start.unwrap_or(0.0);
+            let end = chapter.end.unwrap_or(0.0);
+            let dur = end - start;
+            let mins = (dur / 60.0) as u32;
+            let secs = (dur % 60.0) as u32;
+
+            let row = adw::ActionRow::new();
+            row.set_title(name);
+            row.set_subtitle(&format!("{} min {} sec", mins, secs));
+
+            let prefix_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            prefix_box.set_valign(gtk::Align::Center);
+
+            let indicator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            indicator.add_css_class("chapter-indicator");
+            indicator.set_valign(gtk::Align::Center);
+            indicator.set_halign(gtk::Align::Center);
+
+            if is_finished || listen_pos >= end {
+                indicator.add_css_class("completed");
+            } else if listen_pos >= start && listen_pos < end {
+                indicator.add_css_class("playing");
+                row.add_css_class("chapter-row-playing");
+            } else {
+                indicator.add_css_class("unplayed");
+            }
+
+            let num = gtk::Label::new(Some(&format!("{:02}", i + 1)));
+            num.add_css_class("dim-label");
+            num.add_css_class("monospace");
+            num.add_css_class("caption");
+
+            prefix_box.append(&indicator);
+            prefix_box.append(&num);
+            row.add_prefix(&prefix_box);
+
+            imp.np_chapter_indicators
+                .borrow_mut()
+                .push((start, end, indicator.clone(), row.clone()));
+
+            let play = gtk::Button::from_icon_name("media-playback-start-symbolic");
+            play.add_css_class("flat");
+            play.add_css_class("circular");
+            play.set_valign(gtk::Align::Center);
+            let ch_start = start;
+            let item_id = item.id.clone();
+            let win = self.clone();
+            play.connect_clicked(move |_| {
+                win.jump_to_chapter(&item_id, ch_start);
+            });
+            row.add_suffix(&play);
+            row.set_activatable_widget(Some(&play));
+
+            group.add(&row);
+        }
+        container.append(&group);
+        container.set_visible(true);
+
+        // Now that chapter bounds are known, switch the scale to chapter-relative.
+        self.refresh_now_playing_info();
+    }
+
+    fn jump_to_chapter(&self, item_id: &str, start: f64) {
+        // Nudge slightly past the chapter boundary so seek precision / rounding
+        // can't land us in the final moment of the previous chapter.
+        let target = start + 0.25;
+        let imp = self.imp();
+        let same = imp.current_item_id.borrow().as_deref() == Some(item_id)
+            && imp.pipeline.borrow().is_some();
+        if same {
+            self.seek_to(target);
+        } else {
+            self.start_playback_at(item_id, target);
+        }
+    }
+
+    fn apply_ambient_color(&self, dr: u8, dg: u8, db: u8) {
+        let css = format!(
+            ".now-playing-bg {{ \
+                background-image: linear-gradient(to bottom, #{r:02x}{g:02x}{b:02x} 0%, @window_bg_color 75%); \
+                background-color: #{r:02x}{g:02x}{b:02x}; \
+            }} \
+            .now-playing-header {{ \
+                background-color: #{r:02x}{g:02x}{b:02x}; \
+                box-shadow: none; \
+            }} \
+            .now-playing-header > windowhandle {{ background-color: transparent; }} \
+            .chapter-row-playing {{ \
+                background-color: rgba({r}, {g}, {b}, 0.35); \
+                border-left: 3px solid #{r:02x}{g:02x}{b:02x}; \
+            }} \
+            .chapter-indicator.playing {{ \
+                background-color: #{r:02x}{g:02x}{b:02x}; \
+                box-shadow: 0 0 0 4px rgba({r}, {g}, {b}, 0.25); \
+            }}",
+            r = dr,
+            g = dg,
+            b = db
+        );
+        let provider = self.ensure_ambient_provider();
+        provider.load_from_string(&css);
+        log::info!(
+            "Applied ambient bg color #{:02x}{:02x}{:02x}",
+            dr,
+            dg,
+            db
+        );
+    }
+
+    fn ensure_ambient_provider(&self) -> gtk::CssProvider {
+        // Read borrow first — released at end of let — no overlap with later borrow_mut.
+        let existing = self.imp().now_playing_bg_provider.borrow().clone();
+        if let Some(p) = existing {
+            return p;
+        }
+        let p = gtk::CssProvider::new();
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &p,
+                gtk::STYLE_PROVIDER_PRIORITY_USER,
+            );
+        }
+        *self.imp().now_playing_bg_provider.borrow_mut() = Some(p.clone());
+        p
+    }
+
+    fn build_speed_menu_button(&self) -> gtk::MenuButton {
+        let btn = gtk::MenuButton::new();
+        btn.set_tooltip_text(Some("Playback speed"));
+        btn.add_css_class("flat");
+        let current = self.imp().current_speed.get();
+        btn.set_label(&format!("{:.1}×", current));
+
+        let popover = gtk::Popover::new();
+        let pop_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        pop_box.set_margin_top(8);
+        pop_box.set_margin_bottom(8);
+        pop_box.set_margin_start(8);
+        pop_box.set_margin_end(8);
+
+        for rate in &[0.75_f64, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+            let rate_v = *rate;
+            let label = format!("{:.2}×", rate_v);
+            let item = gtk::Button::with_label(&label);
+            item.add_css_class("flat");
+            let win = self.clone();
+            let btn_ref = btn.clone();
+            let pop_ref = popover.clone();
+            item.connect_clicked(move |_| {
+                win.set_playback_rate(rate_v);
+                btn_ref.set_label(&format!("{:.1}×", rate_v));
+                pop_ref.popdown();
+            });
+            pop_box.append(&item);
+        }
+
+        popover.set_child(Some(&pop_box));
+        btn.set_popover(Some(&popover));
+        *self.imp().now_playing_speed_btn.borrow_mut() = Some(btn.clone());
+        btn
+    }
+
+    fn build_sleep_menu_button(&self) -> gtk::MenuButton {
+        let btn = gtk::MenuButton::new();
+        btn.set_icon_name("alarm-symbolic");
+        btn.set_tooltip_text(Some("Sleep timer"));
+        btn.add_css_class("flat");
+
+        let popover = gtk::Popover::new();
+        let pop_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        pop_box.set_margin_top(8);
+        pop_box.set_margin_bottom(8);
+        pop_box.set_margin_start(8);
+        pop_box.set_margin_end(8);
+
+        for mins in &[5, 15, 30, 45, 60] {
+            let m = *mins;
+            let item = gtk::Button::with_label(&format!("{} minutes", m));
+            item.add_css_class("flat");
+            let win = self.clone();
+            let pop_ref = popover.clone();
+            item.connect_clicked(move |_| {
+                win.start_sleep_timer_minutes(m);
+                pop_ref.popdown();
+            });
+            pop_box.append(&item);
+        }
+
+        let chapter_item = gtk::Button::with_label("End of chapter");
+        chapter_item.add_css_class("flat");
+        let win = self.clone();
+        let pop_ref = popover.clone();
+        chapter_item.connect_clicked(move |_| {
+            win.start_sleep_timer_end_of_chapter();
+            pop_ref.popdown();
+        });
+        pop_box.append(&chapter_item);
+
+        let cancel_item = gtk::Button::with_label("Cancel timer");
+        cancel_item.add_css_class("flat");
+        let win = self.clone();
+        let pop_ref = popover.clone();
+        cancel_item.connect_clicked(move |_| {
+            win.cancel_sleep_timer();
+            pop_ref.popdown();
+        });
+        pop_box.append(&cancel_item);
+
+        popover.set_child(Some(&pop_box));
+        btn.set_popover(Some(&popover));
+        *self.imp().now_playing_sleep_btn.borrow_mut() = Some(btn.clone());
+        btn
+    }
+
+    fn set_playback_rate(&self, rate: f64) {
+        use gstreamer::prelude::*;
+        if rate <= 0.0 || !rate.is_finite() {
+            return;
+        }
+        self.imp().current_speed.set(rate);
+        if let Some(pipeline) = self.imp().pipeline.borrow().as_ref() {
+            let pos = pipeline
+                .query_position::<gstreamer::ClockTime>()
+                .unwrap_or(gstreamer::ClockTime::ZERO);
+            let result = pipeline.seek(
+                rate,
+                gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::ACCURATE,
+                gstreamer::SeekType::Set,
+                pos,
+                gstreamer::SeekType::None,
+                gstreamer::ClockTime::ZERO,
+            );
+            if let Err(e) = result {
+                log::warn!("Failed to set playback rate to {}: {}", rate, e);
+            } else {
+                log::info!("Playback rate set to {}", rate);
+            }
+        }
+    }
+
+    fn start_sleep_timer_minutes(&self, minutes: i64) {
+        self.cancel_sleep_timer();
+        let imp = self.imp();
+        imp.sleep_until_chapter_end.set(false);
+        imp.sleep_remaining_secs.set(minutes * 60);
+
+        let win = self.clone();
+        let id = glib::timeout_add_seconds_local(1, move || {
+            let imp = win.imp();
+            let remaining = imp.sleep_remaining_secs.get() - 1;
+            imp.sleep_remaining_secs.set(remaining);
+            if remaining <= 0 {
+                win.cancel_sleep_timer();
+                if imp.is_playing.get() {
+                    win.toggle_play_pause();
+                }
+                let toast = adw::Toast::new("Sleep timer reached");
+                imp.toast_overlay.add_toast(toast);
+                return glib::ControlFlow::Break;
+            }
+            win.update_sleep_button_label();
+            glib::ControlFlow::Continue
+        });
+        *imp.sleep_timer_source.borrow_mut() = Some(id);
+        self.update_sleep_button_label();
+        let toast = adw::Toast::new(&format!("Sleep timer set: {} minutes", minutes));
+        imp.toast_overlay.add_toast(toast);
+    }
+
+    fn start_sleep_timer_end_of_chapter(&self) {
+        self.cancel_sleep_timer();
+        self.imp().sleep_until_chapter_end.set(true);
+        self.update_sleep_button_label();
+        let toast = adw::Toast::new("Sleep timer: end of chapter");
+        self.imp().toast_overlay.add_toast(toast);
+    }
+
+    fn check_chapter_end_sleep(&self, current_time: f64) {
+        let imp = self.imp();
+        if !imp.sleep_until_chapter_end.get() {
+            return;
+        }
+        for (start, end, _, _) in imp.chapter_indicators.borrow().iter() {
+            if current_time >= *start && current_time < *end {
+                if (end - current_time) <= 1.0 {
+                    self.cancel_sleep_timer();
+                    if imp.is_playing.get() {
+                        self.toggle_play_pause();
+                    }
+                    let toast = adw::Toast::new("Sleep timer: end of chapter reached");
+                    imp.toast_overlay.add_toast(toast);
+                }
+                break;
+            }
+        }
+    }
+
+    fn cancel_sleep_timer(&self) {
+        let imp = self.imp();
+        if let Some(id) = imp.sleep_timer_source.borrow_mut().take() {
+            id.remove();
+        }
+        imp.sleep_until_chapter_end.set(false);
+        imp.sleep_remaining_secs.set(0);
+        self.update_sleep_button_label();
+    }
+
+    fn update_sleep_button_label(&self) {
+        let imp = self.imp();
+        if let Some(btn) = imp.now_playing_sleep_btn.borrow().as_ref() {
+            if imp.sleep_until_chapter_end.get() {
+                btn.set_label("Until chapter end");
+                btn.set_icon_name("");
+            } else if imp.sleep_remaining_secs.get() > 0 {
+                let secs = imp.sleep_remaining_secs.get();
+                let mins = secs / 60;
+                let s = secs % 60;
+                btn.set_label(&format!("{}:{:02}", mins, s));
+                btn.set_icon_name("");
+            } else {
+                btn.set_icon_name("alarm-symbolic");
+            }
+        }
+    }
+
+    fn refresh_now_playing_info(&self) {
+        let imp = self.imp();
+        if !imp.now_playing_open.get() {
+            return;
+        }
+        let title = imp.player_title.text().to_string();
+        let author = imp.player_author.text().to_string();
+        if let Some(label) = imp.now_playing_title.borrow().as_ref() {
+            label.set_text(&title);
+        }
+        if let Some(label) = imp.now_playing_author.borrow().as_ref() {
+            label.set_text(&author);
+        }
+        // Copy paintable from small cover. Skip texture conversion / ambient
+        // bg here — that's handled in load_now_playing_cover after the cover
+        // has been fetched, since the player_bar cover may still be an icon.
+        let small_paintable = imp.player_cover.paintable();
+        if let (Some(target), Some(p)) = (imp.now_playing_cover.borrow().as_ref(), small_paintable)
+        {
+            target.set_paintable(Some(&p));
+        }
+        let dur = *imp.duration.borrow();
+        let cur = *imp.current_time.borrow();
+
+        // Determine the current chapter so the scale shows chapter progress only.
+        let mut ch_start = 0.0;
+        let mut ch_end = dur.max(1.0);
+        let mut found = false;
+        for (start, end, _, _) in imp.np_chapter_indicators.borrow().iter() {
+            if cur >= *start && cur < *end {
+                ch_start = *start;
+                ch_end = *end;
+                found = true;
+                break;
+            }
+        }
+        if !found && !imp.np_chapter_indicators.borrow().is_empty() {
+            // Past the last chapter end (or exactly at it): use the last chapter.
+            if let Some((start, end, _, _)) = imp.np_chapter_indicators.borrow().last() {
+                ch_start = *start;
+                ch_end = *end;
+            }
+        }
+        imp.np_current_chapter_start.set(ch_start);
+
+        let ch_dur = (ch_end - ch_start).max(1.0);
+        let ch_pos = (cur - ch_start).clamp(0.0, ch_dur);
+
+        if let Some(scale) = imp.now_playing_position_scale.borrow().as_ref() {
+            scale.set_range(0.0, ch_dur);
+            imp.updating_slider.set(true);
+            scale.set_value(ch_pos);
+            imp.updating_slider.set(false);
+        }
+        if let Some(label) = imp.now_playing_position_label.borrow().as_ref() {
+            label.set_text(&format_time(ch_pos));
+        }
+        if let Some(label) = imp.now_playing_duration_label.borrow().as_ref() {
+            // Show remaining time in the chapter as -M:SS
+            label.set_text(&format!("-{}", format_time(ch_dur - ch_pos)));
+        }
+    }
+
+    fn load_now_playing_cover(&self, item_id: &str) {
+        let client = self.imp().client.clone();
+        let id = item_id.to_string();
+        let win = self.clone();
+        glib::spawn_future_local(async move {
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result = client.download_cover(&id);
+                let _ = tx.send_blocking(result);
+            });
+            if let Ok(Ok(bytes)) = rx.recv().await {
+                let gbytes = glib::Bytes::from(&bytes);
+                let stream = gio::MemoryInputStream::from_bytes(&gbytes);
+                if let Ok(pixbuf) =
+                    gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gio::Cancellable::NONE)
+                {
+                    let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
+                    if let Some(img) = win.imp().now_playing_cover.borrow().as_ref() {
+                        img.set_paintable(Some(&texture));
+                    }
+                    win.update_ambient_background_from_texture(&texture);
+                }
+            }
+        });
+    }
+
+    fn update_ambient_background_from_texture(&self, texture: &gtk::gdk::Texture) {
+        let w = texture.width();
+        let h = texture.height();
+        if w <= 0 || h <= 0 || w > 4096 || h > 4096 {
+            return;
+        }
+        let stride = (w as usize).saturating_mul(4);
+        let total = stride.saturating_mul(h as usize);
+        if total == 0 || total > 64 * 1024 * 1024 {
+            return;
+        }
+        let mut bytes = vec![0u8; total];
+        // download is safe (no panic on valid buffer), wrap defensively anyway
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            texture.download(&mut bytes, stride);
+        }));
+        if result.is_err() {
+            log::warn!("Cover texture download failed");
+            return;
+        }
+
+        // Sample pixels for dominant color (weighted toward saturated mid-tone pixels)
+        let mut best_r: u64 = 0;
+        let mut best_g: u64 = 0;
+        let mut best_b: u64 = 0;
+        let mut weight_total: u64 = 0;
+        let step = ((w as usize) / 32).max(1) * 4;
+        let row_step = ((h as usize) / 32).max(1);
+        let mut y = 0usize;
+        while y < h as usize {
+            let row = &bytes[y * stride..(y + 1) * stride];
+            let mut x = 0usize;
+            while x < stride {
+                let b = row[x] as u64;
+                let g = row[x + 1] as u64;
+                let r = row[x + 2] as u64;
+                let max = r.max(g).max(b);
+                let min = r.min(g).min(b);
+                let sat = max.saturating_sub(min);
+                if max > 30 && max < 230 {
+                    let weight = (sat + 1) * (max as u64);
+                    best_r += r * weight;
+                    best_g += g * weight;
+                    best_b += b * weight;
+                    weight_total += weight;
+                }
+                x += step;
+            }
+            y += row_step;
+        }
+
+        let (r, g, b) = if weight_total == 0 {
+            (60, 60, 80)
+        } else {
+            (
+                (best_r / weight_total) as u8,
+                (best_g / weight_total) as u8,
+                (best_b / weight_total) as u8,
+            )
+        };
+
+        // Darken the ambient color so foreground stays readable
+        let darken = |c: u8| ((c as f32) * 0.55).round() as u8;
+        let (dr, dg, db) = (darken(r), darken(g), darken(b));
+
+        log::info!(
+            "Ambient color from cover: rgb({},{},{}) → darkened #{:02x}{:02x}{:02x}",
+            r,
+            g,
+            b,
+            dr,
+            dg,
+            db
+        );
+
+        let css = format!(
+            ".now-playing-bg {{ \
+                background-image: linear-gradient(to bottom, #{r:02x}{g:02x}{b:02x} 0%, @window_bg_color 75%); \
+                background-color: #{r:02x}{g:02x}{b:02x}; \
+            }} \
+            .now-playing-header {{ \
+                background-color: #{r:02x}{g:02x}{b:02x}; \
+                box-shadow: none; \
+            }} \
+            .now-playing-header > windowhandle {{ background-color: transparent; }}",
+            r = dr,
+            g = dg,
+            b = db
+        );
+
+        let provider = self.ensure_ambient_provider();
+        provider.load_from_string(&css);
+    }
+
     fn seek_relative(&self, delta_secs: i64) {
         use gstreamer::prelude::*;
         let imp = self.imp();
@@ -1611,9 +2559,14 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 } else {
                     pos + gstreamer::ClockTime::from_seconds(delta_secs as u64)
                 };
-                let _ = pipeline.seek_simple(
-                    gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+                let rate = imp.current_speed.get();
+                let _ = pipeline.seek(
+                    rate,
+                    gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::ACCURATE,
+                    gstreamer::SeekType::Set,
                     new_pos,
+                    gstreamer::SeekType::None,
+                    gstreamer::ClockTime::ZERO,
                 );
             }
         }
@@ -1622,12 +2575,54 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
     fn seek_to(&self, seconds: f64) {
         use gstreamer::prelude::*;
         let imp = self.imp();
+        let seconds = seconds.max(0.0);
         if let Some(pipeline) = imp.pipeline.borrow().as_ref() {
-            let position = gstreamer::ClockTime::from_seconds(seconds as u64);
-            let _ = pipeline.seek_simple(
-                gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+            // ACCURATE (not KEY_UNIT) so we land exactly on the target instead of
+            // snapping back to the previous keyframe (which fell into the prior chapter).
+            // Use full seek() to also preserve the current playback rate.
+            let position =
+                gstreamer::ClockTime::from_nseconds((seconds * 1_000_000_000.0) as u64);
+            let rate = imp.current_speed.get();
+            let _ = pipeline.seek(
+                rate,
+                gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::ACCURATE,
+                gstreamer::SeekType::Set,
                 position,
+                gstreamer::SeekType::None,
+                gstreamer::ClockTime::ZERO,
             );
+        }
+        // Reflect the new position immediately so the chapter indicator and
+        // scale don't linger on the old chapter until the next timer tick.
+        *imp.current_time.borrow_mut() = seconds;
+        // Tell the progress timer to ignore stale gstreamer position reads until
+        // the pipeline actually settles near the target (prevents the indicator
+        // from bouncing back to the previous chapter for a tick or two).
+        imp.seek_settle_target.set(seconds);
+        imp.seek_settle_ticks.set(5);
+        imp.updating_slider.set(true);
+        imp.position_scale.set_value(seconds);
+        if let Some(scale) = imp.now_playing_position_scale.borrow().as_ref() {
+            scale.set_value(seconds);
+        }
+        imp.updating_slider.set(false);
+        imp.position_label.set_text(&format_time(seconds));
+        if let Some(label) = imp.now_playing_position_label.borrow().as_ref() {
+            label.set_text(&format_time(seconds));
+        }
+        self.refresh_chapter_indicators(seconds);
+
+        // Report the new position to the Audiobookshelf server immediately so the
+        // session progress is authoritative, not just the local seek.
+        let session_id = imp.session_id.borrow().clone();
+        if let Some(sid) = session_id {
+            let client = imp.client.clone();
+            let duration = *imp.duration.borrow();
+            std::thread::spawn(move || {
+                if let Err(e) = client.sync_session(&sid, seconds, duration) {
+                    log::warn!("Seek sync error: {}", e);
+                }
+            });
         }
     }
 
@@ -2213,6 +3208,7 @@ the session may expire and require signing in again"
         menu_button.set_tooltip_text(Some("Menu"));
 
         let menu = gio::Menu::new();
+        menu.append(Some("Preferences"), Some("app.preferences"));
         menu.append(Some("About"), Some("app.about"));
         menu.append(Some("Log Out"), Some("app.logout"));
         menu.append(Some("Quit"), Some("app.quit"));
@@ -3302,6 +4298,7 @@ the session may expire and require signing in again"
                         indicator.add_css_class("completed");
                     } else if listen_pos >= start && listen_pos < end {
                         indicator.add_css_class("playing");
+                        row.add_css_class("chapter-row-playing");
                     } else {
                         indicator.add_css_class("unplayed");
                     }
@@ -3317,7 +4314,7 @@ the session may expire and require signing in again"
 
                     imp.chapter_indicators
                         .borrow_mut()
-                        .push((start, end, indicator.clone()));
+                        .push((start, end, indicator.clone(), row.clone()));
 
                     let ch_play = gtk::Button::from_icon_name("media-playback-start-symbolic");
                     ch_play.add_css_class("flat");
@@ -3327,7 +4324,7 @@ the session may expire and require signing in again"
                     let item_id = item.id.clone();
                     let win = self.clone();
                     ch_play.connect_clicked(move |_| {
-                        win.start_playback_at(&item_id, ch_start);
+                        win.jump_to_chapter(&item_id, ch_start);
                     });
                     row.add_suffix(&ch_play);
                     row.set_activatable_widget(Some(&ch_play));
@@ -3363,9 +4360,36 @@ the session may expire and require signing in again"
         self.start_playback_at(item_id, -1.0);
     }
 
+    fn refresh_ambient_for_item(&self, item_id: &str) {
+        let client = self.imp().client.clone();
+        let id = item_id.to_string();
+        let win = self.clone();
+        glib::spawn_future_local(async move {
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result = client.download_cover(&id);
+                let _ = tx.send_blocking(result);
+            });
+            if let Ok(Ok(bytes)) = rx.recv().await {
+                let gbytes = glib::Bytes::from(&bytes);
+                let stream = gio::MemoryInputStream::from_bytes(&gbytes);
+                if let Ok(pixbuf) =
+                    gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gio::Cancellable::NONE)
+                {
+                    let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
+                    win.update_ambient_background_from_texture(&texture);
+                }
+            }
+        });
+    }
+
     fn start_playback_at(&self, item_id: &str, seek_override: f64) {
         // Stop existing playback, close old session
         self.stop_playback();
+
+        // Kick off ambient color computation from cover for chapter highlight
+        // and Now Playing background.
+        self.refresh_ambient_for_item(item_id);
 
         let imp = self.imp();
         let client = imp.client.clone();
@@ -3521,6 +4545,15 @@ the session may expire and require signing in again"
             playbin.set_property("buffer-size", 10 * 1024 * 1024i32);
         }
 
+        // Insert scaletempo so rate changes preserve pitch
+        if playbin.find_property("audio-filter").is_some() {
+            if let Ok(scaletempo) = gstreamer::ElementFactory::make("scaletempo").build() {
+                playbin.set_property("audio-filter", &scaletempo);
+            } else {
+                log::warn!("scaletempo element unavailable; rate changes will alter pitch");
+            }
+        }
+
         let bus = playbin.bus().unwrap();
         let pipeline_weak = playbin.downgrade();
         let seek_target = if start_position > 1.0 {
@@ -3534,6 +4567,7 @@ the session may expire and require signing in again"
         let is_buffering_clone = is_buffering.clone();
         let is_playing = imp.is_playing.clone();
         let win_weak = self.downgrade();
+        let win_for_rate = self.clone();
 
         let guard = bus
             .add_watch_local(move |_, msg| {
@@ -3543,14 +4577,23 @@ the session may expire and require signing in again"
                         if !initial_seek_clone.get() {
                             initial_seek_clone.set(true);
                             if let Some(pipeline) = pipeline_weak.upgrade() {
+                                let target_pos = seek_target
+                                    .map(|p| gstreamer::ClockTime::from_seconds(p as u64))
+                                    .unwrap_or(gstreamer::ClockTime::ZERO);
+                                let rate = win_for_rate.imp().current_speed.get();
+                                let _ = pipeline.seek(
+                                    rate,
+                                    gstreamer::SeekFlags::FLUSH
+                                        | gstreamer::SeekFlags::ACCURATE,
+                                    gstreamer::SeekType::Set,
+                                    target_pos,
+                                    gstreamer::SeekType::None,
+                                    gstreamer::ClockTime::ZERO,
+                                );
                                 if let Some(pos) = seek_target {
-                                    let clock_pos = gstreamer::ClockTime::from_seconds(pos as u64);
-                                    let _ = pipeline.seek_simple(
-                                        gstreamer::SeekFlags::FLUSH
-                                            | gstreamer::SeekFlags::KEY_UNIT,
-                                        clock_pos,
-                                    );
-                                    log::info!("Seeked to position: {:.0}s", pos);
+                                    log::info!("Seeked to position: {:.0}s (rate {:.2})", pos, rate);
+                                } else if rate != 1.0 {
+                                    log::info!("Applied rate {:.2}× on start", rate);
                                 }
                             }
                         }
@@ -3615,13 +4658,32 @@ the session may expire and require signing in again"
             if let Some(pipeline) = imp.pipeline.borrow().as_ref() {
                 if imp.is_playing.get() {
                     if let Some(pos) = pipeline.query_position::<gstreamer::ClockTime>() {
-                        let secs = pos.seconds() as f64;
+                        // Precise (not truncated) seconds so a position like 599.97
+                        // isn't read as 599 and pushed back into the previous chapter.
+                        let secs = pos.nseconds() as f64 / 1_000_000_000.0;
+
+                        // After a seek, gstreamer can briefly report the old
+                        // position. Skip those readings until it settles near
+                        // the seek target so the chapter indicator stays put.
+                        let settle = imp.seek_settle_target.get();
+                        if settle >= 0.0 {
+                            let ticks = imp.seek_settle_ticks.get().saturating_sub(1);
+                            imp.seek_settle_ticks.set(ticks);
+                            if (secs - settle).abs() <= 2.0 || ticks == 0 {
+                                imp.seek_settle_target.set(-1.0);
+                            } else {
+                                return glib::ControlFlow::Continue;
+                            }
+                        }
+
                         imp.updating_slider.set(true);
                         imp.position_scale.set_value(secs);
                         imp.updating_slider.set(false);
                         imp.position_label.set_text(&format_time(secs));
                         *imp.current_time.borrow_mut() = secs;
                         win.refresh_chapter_indicators(secs);
+                        win.refresh_now_playing_info();
+                        win.check_chapter_end_sleep(secs);
                     }
                 }
                 glib::ControlFlow::Continue
