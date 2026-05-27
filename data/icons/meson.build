@@ -1,10 +1,9 @@
 application_id = 'io.github.yusyel.ShelfilyDesktop'
 
-scalable_dir = 'hicolor' / 'scalable' / 'apps'
-install_data(
-  scalable_dir / ('@0@.svg').format(application_id),
-  install_dir: get_option('datadir') / 'icons' / scalable_dir
-)
+# NOTE: the scalable app SVG is intentionally NOT installed. It relies on
+# <clipPath> + nested transforms that nanosvg-based renderers (e.g. the
+# fuzzel launcher) cannot draw, leaving the icon blank. The fixed-size PNGs
+# below (up to 512px) render correctly everywhere, including GNOME.
 
 symbolic_dir = 'hicolor' / 'symbolic' / 'apps'
 install_data(
