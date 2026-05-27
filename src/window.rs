@@ -509,6 +509,14 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             .cover-play-btn {
                 transition: opacity 200ms ease;
             }
+            .cover-progress-track {
+                background-color: alpha(black, 0.55);
+                min-height: 8px;
+            }
+            .cover-progress-fill {
+                background-color: @accent_color;
+                min-height: 8px;
+            }
             .detail-play-btn {
                 min-width: 64px;
                 min-height: 64px;
@@ -2539,24 +2547,56 @@ the session may expire and require signing in again"
 
         glib::spawn_future_local(async move {
             let (tx, rx) = async_channel::bounded(1);
+            let client_worker = client.clone();
             std::thread::spawn(move || {
-                let result = client.get_items_in_progress();
-                let _ = tx.send_blocking(result);
+                // Fetch items-in-progress and the user's media progress array together.
+                let items = client_worker.get_items_in_progress();
+                let me = client_worker.get_me();
+                let _ = tx.send_blocking((items, me));
             });
 
             match rx.recv().await {
-                Ok(Ok(items)) => {
+                Ok((Ok(items), me_result)) => {
                     log::info!("Continue listening items: {}", items.len());
+
+                    // Build lookup map from MediaProgress by libraryItemId
+                    let progress_map: HashMap<String, MediaProgress> = match me_result {
+                        Ok(user) => user
+                            .media_progress
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|p| {
+                                p.library_item_id
+                                    .clone()
+                                    .map(|id| (id, p))
+                            })
+                            .collect(),
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to fetch user media progress for continue listening: {}",
+                                e
+                            );
+                            HashMap::new()
+                        }
+                    };
+
                     let mut seen = HashSet::new();
                     let deduped: Vec<LibraryItem> = items
-                        .iter()
+                        .into_iter()
                         .filter(|item| seen.insert(item.id.clone()))
-                        .cloned()
+                        .map(|mut item| {
+                            if item.user_media_progress.is_none() {
+                                if let Some(p) = progress_map.get(&item.id) {
+                                    item.user_media_progress = Some(p.clone());
+                                }
+                            }
+                            item
+                        })
                         .collect();
                     *win.imp().continue_items.borrow_mut() = deduped;
                     win.render_continue_listening();
                 }
-                Ok(Err(e)) => {
+                Ok((Err(e), _)) => {
                     log::warn!("Failed to load continue listening books: {}", e);
                 }
                 Err(_) => {
@@ -2653,38 +2693,55 @@ the session may expire and require signing in again"
             .and_then(|p| p.is_finished)
             .unwrap_or(false);
 
-        // Red progress bar under the cover
-        let bar_track = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        bar_track.set_height_request(4);
-        bar_track.set_hexpand(true);
-
-        if progress_val > 0.0 || is_finished {
-            let frac = if is_finished { 1.0 } else { progress_val };
-
-            let bar_fill = gtk::DrawingArea::new();
-            bar_fill.set_height_request(4);
-            bar_fill.set_hexpand(true);
-            let frac_c = frac;
-            bar_fill.set_draw_func(move |_area, cr, width, height| {
-                // Gray background
-                cr.set_source_rgb(0.3, 0.3, 0.3);
-                let _ = cr.paint();
-                // Red fill
-                cr.set_source_rgb(0.9, 0.2, 0.2);
-                cr.rectangle(0.0, 0.0, width as f64 * frac_c, height as f64);
-                let _ = cr.fill();
-            });
-            bar_track.append(&bar_fill);
-            bar_track.set_visible(true);
-        } else {
-            bar_track.set_visible(false);
-        }
-
-        cover_box.append(&bar_track);
-
         // Gelly tarzı: overlay üzerinde hover'da beliren dairesel play butonu
         let cover_overlay = gtk::Overlay::new();
         cover_overlay.set_child(Some(&cover_box));
+
+        // Progress overlay at bottom of cover (track + fill row)
+        if progress_val > 0.0 || is_finished {
+            log::debug!(
+                "Book {} progress: {:.2}% finished={}",
+                item.id,
+                progress_val * 100.0,
+                is_finished
+            );
+            let frac = if is_finished { 1.0 } else { progress_val.clamp(0.0, 1.0) };
+
+            let track = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            track.add_css_class("cover-progress-track");
+            track.set_height_request(8);
+            track.set_size_request(-1, 8);
+            track.set_hexpand(true);
+            track.set_valign(gtk::Align::End);
+            track.set_halign(gtk::Align::Fill);
+
+            let fill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            fill.add_css_class("cover-progress-fill");
+            fill.set_size_request(1, 8);
+            track.append(&fill);
+
+            let remainder = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            remainder.set_hexpand(true);
+            track.append(&remainder);
+
+            let frac_f = frac as f32;
+            let fill_tick = fill.clone();
+            let remainder_tick = remainder.clone();
+            track.add_tick_callback(move |widget, _| {
+                let width = widget.width();
+                if width > 0 {
+                    let fw = (width as f32 * frac_f).round() as i32;
+                    let fw = fw.max(1);
+                    if fill_tick.width_request() != fw {
+                        fill_tick.set_size_request(fw, 8);
+                        remainder_tick.set_size_request((width - fw).max(0), 8);
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+
+            cover_overlay.add_overlay(&track);
+        }
 
         let hover_play = gtk::Button::from_icon_name("media-playback-start-symbolic");
         hover_play.add_css_class("circular");
