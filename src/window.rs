@@ -80,6 +80,9 @@ mod imp {
         pub bookmarks_group: RefCell<Option<adw::PreferencesGroup>>,
         pub bookmarks_section: RefCell<Option<gtk::Box>>,
         pub library_search_entry: RefCell<Option<gtk::SearchEntry>>,
+        pub all_bookmarks: RefCell<Vec<Bookmark>>,
+        pub bookmarks_list_box: RefCell<Option<gtk::Box>>,
+        pub bookmarks_tab_empty: RefCell<Option<adw::StatusPage>>,
         // Persistent bottom player bar
         pub player_bar: gtk::ActionBar,
         pub player_title: gtk::Label,
@@ -140,6 +143,9 @@ mod imp {
                 bookmarks_group: RefCell::new(None),
                 bookmarks_section: RefCell::new(None),
                 library_search_entry: RefCell::new(None),
+                all_bookmarks: RefCell::new(Vec::new()),
+                bookmarks_list_box: RefCell::new(None),
+                bookmarks_tab_empty: RefCell::new(None),
                 player_bar,
                 player_title: gtk::Label::new(None),
                 player_author: gtk::Label::new(None),
@@ -1139,6 +1145,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                     win.imp().toast_overlay.add_toast(toast);
                     if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
                         win.load_bookmarks(&target_item_id);
+                        win.load_all_bookmarks();
                     }
                 }
                 Ok(Err(err)) => {
@@ -1175,6 +1182,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                     win.imp().toast_overlay.add_toast(toast);
                     if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
                         win.load_bookmarks(&target_item_id);
+                        win.load_all_bookmarks();
                     }
                 }
                 Ok(Err(err)) => {
@@ -1210,6 +1218,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                     win.imp().toast_overlay.add_toast(toast);
                     if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
                         win.load_bookmarks(&target_item_id);
+                        win.load_all_bookmarks();
                     }
                 }
                 Ok(Err(err)) => {
@@ -1223,6 +1232,223 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 }
             }
         });
+    }
+
+    fn load_all_bookmarks(&self) {
+        let client = self.imp().client.clone();
+        let win = self.clone();
+        let (tx, rx) = async_channel::bounded::<Result<Vec<Bookmark>, String>>(1);
+        std::thread::spawn(move || {
+            let result = client
+                .get_me()
+                .map(|u| u.bookmarks.unwrap_or_default())
+                .map_err(|e| e.to_string());
+            let _ = tx.send_blocking(result);
+        });
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok(mut bookmarks)) => {
+                    bookmarks.sort_by(|a, b| {
+                        b.created_at
+                            .unwrap_or(0)
+                            .cmp(&a.created_at.unwrap_or(0))
+                    });
+                    *win.imp().all_bookmarks.borrow_mut() = bookmarks;
+                    win.render_bookmarks_tab();
+                }
+                Ok(Err(err)) => log::warn!("Load all bookmarks failed: {}", err),
+                Err(err) => log::warn!("All bookmarks channel error: {}", err),
+            }
+        });
+    }
+
+    fn render_bookmarks_tab(&self) {
+        let imp = self.imp();
+        let list_box = match imp.bookmarks_list_box.borrow().clone() {
+            Some(b) => b,
+            None => return,
+        };
+        let empty_page = imp.bookmarks_tab_empty.borrow().clone();
+
+        while let Some(child) = list_box.first_child() {
+            list_box.remove(&child);
+        }
+
+        let bookmarks = imp.all_bookmarks.borrow().clone();
+        let stack = empty_page
+            .as_ref()
+            .and_then(|p| p.parent())
+            .and_then(|w| w.downcast::<gtk::Stack>().ok());
+
+        if bookmarks.is_empty() {
+            if let Some(s) = stack {
+                s.set_visible_child_name("empty");
+            }
+            return;
+        }
+        if let Some(s) = stack {
+            s.set_visible_child_name("content");
+        }
+
+        // Index library items by id for quick lookups
+        let items_by_id: HashMap<String, LibraryItem> = imp
+            .library_items
+            .borrow()
+            .iter()
+            .map(|item| (item.id.clone(), item.clone()))
+            .collect();
+
+        // Group bookmarks by library item id, preserving first-seen order
+        let mut ordered_ids: Vec<String> = Vec::new();
+        let mut grouped: HashMap<String, Vec<Bookmark>> = HashMap::new();
+        for bm in bookmarks.iter() {
+            let id = match bm.library_item_id.as_ref() {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+            if !grouped.contains_key(&id) {
+                ordered_ids.push(id.clone());
+            }
+            grouped.entry(id).or_default().push(bm.clone());
+        }
+
+        for id in &ordered_ids {
+            let book_title = items_by_id
+                .get(id)
+                .and_then(|i| i.media.as_ref())
+                .and_then(|m| m.metadata.as_ref())
+                .and_then(|md| md.title.as_deref())
+                .unwrap_or("Unknown book")
+                .to_string();
+
+            let book_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+            let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            header_box.set_halign(gtk::Align::Start);
+
+            let cover_frame = gtk::Frame::new(None);
+            cover_frame.add_css_class("book-cover-frame");
+            cover_frame.set_size_request(56, 56);
+            let cover_image = gtk::Image::from_icon_name("audio-x-generic-symbolic");
+            cover_image.set_pixel_size(56);
+            cover_image.set_size_request(56, 56);
+            cover_image.add_css_class("dim-label");
+            cover_frame.set_child(Some(&cover_image));
+            header_box.append(&cover_frame);
+
+            let title_label = gtk::Label::new(Some(&book_title));
+            title_label.add_css_class("title-3");
+            title_label.set_halign(gtk::Align::Start);
+            title_label.set_valign(gtk::Align::Center);
+            title_label.set_wrap(true);
+            title_label.set_xalign(0.0);
+            header_box.append(&title_label);
+
+            // Make the header clickable → open book detail
+            let header_btn = gtk::Button::new();
+            header_btn.add_css_class("flat");
+            header_btn.set_child(Some(&header_box));
+            let win_header = self.clone();
+            let item_id_header = id.clone();
+            header_btn.connect_clicked(move |_| {
+                win_header.open_audiobook_detail(&item_id_header);
+            });
+            book_box.append(&header_btn);
+
+            // Async load cover
+            let client = self.imp().client.clone();
+            let id_for_cover = id.clone();
+            let img = cover_image.clone();
+            glib::spawn_future_local(async move {
+                let (tx, rx) = async_channel::bounded(1);
+                std::thread::spawn(move || {
+                    let result = client.download_cover(&id_for_cover);
+                    let _ = tx.send_blocking(result);
+                });
+                if let Ok(Ok(bytes)) = rx.recv().await {
+                    let gbytes = glib::Bytes::from(&bytes);
+                    let stream = gio::MemoryInputStream::from_bytes(&gbytes);
+                    if let Ok(pixbuf) =
+                        gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gio::Cancellable::NONE)
+                    {
+                        let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
+                        img.set_paintable(Some(&texture));
+                        img.remove_css_class("dim-label");
+                    }
+                }
+            });
+
+            let group = adw::PreferencesGroup::new();
+
+            let item_bookmarks = grouped.get(id).cloned().unwrap_or_default();
+            // Within a book, sort by time ascending so they appear in playback order
+            let mut item_bookmarks = item_bookmarks;
+            item_bookmarks.sort_by(|a, b| {
+                a.time
+                    .unwrap_or(0.0)
+                    .partial_cmp(&b.time.unwrap_or(0.0))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            for bm in item_bookmarks.iter() {
+                let time = bm.time.unwrap_or(0.0);
+                let title = bm
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| format!("Bookmark at {}", format_time(time)));
+
+                let row = adw::ActionRow::new();
+                row.set_title(&title);
+                row.set_subtitle(&format_time(time));
+
+                let icon = gtk::Image::from_icon_name("user-bookmarks-symbolic");
+                icon.add_css_class("dim-label");
+                row.add_prefix(&icon);
+
+                let play_btn = gtk::Button::from_icon_name("media-playback-start-symbolic");
+                play_btn.add_css_class("flat");
+                play_btn.add_css_class("circular");
+                play_btn.set_valign(gtk::Align::Center);
+                play_btn.set_tooltip_text(Some("Play from this position"));
+                let win_play = self.clone();
+                let item_id_play = id.clone();
+                play_btn.connect_clicked(move |_| {
+                    win_play.start_playback_at(&item_id_play, time);
+                });
+                row.add_suffix(&play_btn);
+
+                let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+                edit_btn.add_css_class("flat");
+                edit_btn.add_css_class("circular");
+                edit_btn.set_valign(gtk::Align::Center);
+                edit_btn.set_tooltip_text(Some("Edit note"));
+                let win_edit = self.clone();
+                let item_id_edit = id.clone();
+                let title_edit = title.clone();
+                edit_btn.connect_clicked(move |_| {
+                    win_edit.prompt_bookmark_dialog(&item_id_edit, time, &title_edit, false);
+                });
+                row.add_suffix(&edit_btn);
+
+                let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+                del_btn.add_css_class("flat");
+                del_btn.add_css_class("circular");
+                del_btn.set_valign(gtk::Align::Center);
+                del_btn.set_tooltip_text(Some("Remove bookmark"));
+                let win_del = self.clone();
+                let item_id_del = id.clone();
+                del_btn.connect_clicked(move |_| {
+                    win_del.delete_bookmark(&item_id_del, time);
+                });
+                row.add_suffix(&del_btn);
+
+                row.set_activatable_widget(Some(&play_btn));
+                group.add(&row);
+            }
+
+            book_box.append(&group);
+            list_box.append(&book_box);
+        }
     }
 
     fn load_bookmarks(&self, item_id: &str) {
@@ -2050,6 +2276,45 @@ the session may expire and require signing in again"
         let library_page = view_stack.add_titled(&library_scrolled, Some("all"), "All Books");
         library_page.set_icon_name(Some("view-grid-symbolic"));
 
+        // Tab 3: Bookmarks
+        let bookmarks_scrolled = gtk::ScrolledWindow::new();
+        bookmarks_scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+        bookmarks_scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
+
+        let bookmarks_clamp = adw::Clamp::new();
+        bookmarks_clamp.set_maximum_size(1200);
+        bookmarks_clamp.set_margin_top(16);
+        bookmarks_clamp.set_margin_bottom(16);
+        bookmarks_clamp.set_margin_start(16);
+        bookmarks_clamp.set_margin_end(16);
+
+        let bookmarks_stack_inner = gtk::Stack::new();
+        bookmarks_stack_inner
+            .set_transition_type(gtk::StackTransitionType::Crossfade);
+
+        let bookmarks_empty = adw::StatusPage::new();
+        bookmarks_empty.set_icon_name(Some("user-bookmarks-symbolic"));
+        bookmarks_empty.set_title("No bookmarks yet");
+        bookmarks_empty.set_description(Some(
+            "Use the bookmark button in the player bar to save positions",
+        ));
+
+        let bookmarks_list_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+
+        bookmarks_stack_inner.add_named(&bookmarks_empty, Some("empty"));
+        bookmarks_stack_inner.add_named(&bookmarks_list_box, Some("content"));
+        bookmarks_stack_inner.set_visible_child_name("empty");
+
+        bookmarks_clamp.set_child(Some(&bookmarks_stack_inner));
+        bookmarks_scrolled.set_child(Some(&bookmarks_clamp));
+
+        let bookmarks_page =
+            view_stack.add_titled(&bookmarks_scrolled, Some("bookmarks"), "Bookmarks");
+        bookmarks_page.set_icon_name(Some("user-bookmarks-symbolic"));
+
+        *self.imp().bookmarks_list_box.borrow_mut() = Some(bookmarks_list_box);
+        *self.imp().bookmarks_tab_empty.borrow_mut() = Some(bookmarks_empty);
+
         // ViewSwitcher in the header
         let switcher = adw::ViewSwitcher::new();
         switcher.set_stack(Some(&view_stack));
@@ -2172,6 +2437,9 @@ the session may expire and require signing in again"
 
         // Fetch "Continue" items from the server
         self.load_continue_listening();
+
+        // Fetch all bookmarks for the Bookmarks tab
+        self.load_all_bookmarks();
     }
 
     fn render_library(&self) {
