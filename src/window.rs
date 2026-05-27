@@ -2210,11 +2210,11 @@ the session may expire and require signing in again"
         menu.append(Some("Quit"), Some("app.quit"));
         menu_button.set_menu_model(Some(&menu));
 
-        // Right-side order: hamburger (far right), search, sort, refresh.
+        // Left side: refresh, sort, search. Right side: hamburger menu.
+        header.pack_start(&refresh_btn);
+        header.pack_start(&sort_btn);
+        header.pack_start(&search_btn);
         header.pack_end(&menu_button);
-        header.pack_end(&search_btn);
-        header.pack_end(&sort_btn);
-        header.pack_end(&refresh_btn);
 
         // ── ViewStack with two tabs ──
         let view_stack = adw::ViewStack::new();
@@ -3180,9 +3180,17 @@ the session may expire and require signing in again"
                 desc_title.set_halign(gtk::Align::Start);
                 detail_box.append(&desc_title);
 
-                let desc_label = gtk::Label::new(Some(desc));
+                let desc_label = gtk::Label::new(None);
+                let pango_markup = markdown_to_pango(desc);
+                if gtk::pango::parse_markup(&pango_markup, '\0').is_ok() {
+                    desc_label.set_markup(&pango_markup);
+                } else {
+                    log::warn!("Description markup invalid, falling back to plain text");
+                    desc_label.set_label(desc);
+                }
                 desc_label.set_wrap(true);
                 desc_label.set_halign(gtk::Align::Start);
+                desc_label.set_xalign(0.0);
                 desc_label.set_selectable(true);
                 desc_label.add_css_class("body");
                 detail_box.append(&desc_label);
@@ -3600,6 +3608,152 @@ the session may expire and require signing in again"
         });
         *imp.sync_source.borrow_mut() = Some(source_id);
     }
+}
+
+fn pango_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+}
+
+fn html_to_pango(html: &str) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    let bytes = html.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Find end of tag
+            if let Some(end) = html[i..].find('>') {
+                let tag = &html[i + 1..i + end];
+                let lower = tag.to_ascii_lowercase();
+                let trimmed = lower.trim_start_matches('/').trim();
+                let tag_name = trimmed
+                    .split(|c: char| c.is_whitespace() || c == '/')
+                    .next()
+                    .unwrap_or("");
+                let closing = lower.starts_with('/');
+                match tag_name {
+                    "br" => out.push('\n'),
+                    "p" | "div" => {
+                        if closing {
+                            out.push_str("\n\n");
+                        }
+                    }
+                    "b" | "strong" => out.push_str(if closing { "</b>" } else { "<b>" }),
+                    "i" | "em" => out.push_str(if closing { "</i>" } else { "<i>" }),
+                    "u" => out.push_str(if closing { "</u>" } else { "<u>" }),
+                    "s" | "strike" | "del" => {
+                        out.push_str(if closing { "</s>" } else { "<s>" })
+                    }
+                    "code" | "tt" => out.push_str(if closing { "</tt>" } else { "<tt>" }),
+                    _ => {}
+                }
+                i += end + 1;
+                continue;
+            }
+        }
+        // Decode entities lazily — append a chunk up to next '<' or end
+        let next_lt = html[i..].find('<').map(|n| i + n).unwrap_or(bytes.len());
+        let chunk = &html[i..next_lt];
+        out.push_str(&pango_escape(&decode_html_entities(chunk)));
+        i = next_lt;
+    }
+    out
+}
+
+fn markdown_to_pango(input: &str) -> String {
+    use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    let parser = Parser::new_ext(input, options);
+    let mut out = String::new();
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
+
+    for event in parser {
+        match event {
+            Event::Start(tag) => match tag {
+                Tag::Paragraph => {}
+                Tag::Heading { level, .. } => {
+                    let size = match level {
+                        HeadingLevel::H1 => "x-large",
+                        HeadingLevel::H2 => "large",
+                        _ => "medium",
+                    };
+                    out.push_str(&format!("<span weight=\"bold\" size=\"{}\">", size));
+                }
+                Tag::BlockQuote => out.push_str("<i>"),
+                Tag::CodeBlock(_) => out.push_str("<tt>"),
+                Tag::List(start) => list_stack.push(start),
+                Tag::Item => {
+                    if let Some(Some(n)) = list_stack.last_mut() {
+                        out.push_str(&format!("{}. ", n));
+                        *n += 1;
+                    } else {
+                        out.push_str("• ");
+                    }
+                }
+                Tag::Emphasis => out.push_str("<i>"),
+                Tag::Strong => out.push_str("<b>"),
+                Tag::Strikethrough => out.push_str("<s>"),
+                Tag::Link { dest_url, .. } => {
+                    out.push_str(&format!("<a href=\"{}\">", pango_escape(&dest_url)));
+                }
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Paragraph => out.push_str("\n\n"),
+                TagEnd::Heading(_) => out.push_str("</span>\n\n"),
+                TagEnd::BlockQuote => out.push_str("</i>\n"),
+                TagEnd::CodeBlock => out.push_str("</tt>\n"),
+                TagEnd::List(_) => {
+                    list_stack.pop();
+                    out.push('\n');
+                }
+                TagEnd::Item => out.push('\n'),
+                TagEnd::Emphasis => out.push_str("</i>"),
+                TagEnd::Strong => out.push_str("</b>"),
+                TagEnd::Strikethrough => out.push_str("</s>"),
+                TagEnd::Link => out.push_str("</a>"),
+                _ => {}
+            },
+            Event::Text(t) => out.push_str(&pango_escape(&t)),
+            Event::Code(t) => {
+                out.push_str("<tt>");
+                out.push_str(&pango_escape(&t));
+                out.push_str("</tt>");
+            }
+            Event::Html(s) | Event::InlineHtml(s) => {
+                out.push_str(&html_to_pango(&s));
+            }
+            Event::SoftBreak => out.push(' '),
+            Event::HardBreak => out.push('\n'),
+            Event::Rule => out.push_str("\n────────\n"),
+            _ => {}
+        }
+    }
+
+    let trimmed = out.trim_end_matches('\n').to_string();
+    if trimmed.trim().is_empty() && !input.trim().is_empty() {
+        // Fallback: treat input as plain HTML if markdown produced nothing
+        let html_out = html_to_pango(input);
+        if !html_out.trim().is_empty() {
+            return html_out.trim_end_matches('\n').to_string();
+        }
+        return pango_escape(input);
+    }
+    trimmed
 }
 
 fn format_time(seconds: f64) -> String {
