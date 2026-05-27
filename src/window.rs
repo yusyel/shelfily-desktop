@@ -906,17 +906,141 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         }
     }
 
-    fn filter_library_by_author(&self, author_name: &str) {
+    fn show_author_books(&self, author_id: Option<&str>, author_name: &str) {
         let imp = self.imp();
-        if let Some(nav_view) = imp.nav_view.borrow().as_ref() {
-            while nav_view.pop() {}
+        let nav_view = match imp.nav_view.borrow().clone() {
+            Some(v) => v,
+            None => return,
+        };
+
+        let scrolled = gtk::ScrolledWindow::new();
+        scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+        scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
+
+        let clamp = adw::Clamp::new();
+        clamp.set_maximum_size(960);
+        clamp.set_margin_top(24);
+        clamp.set_margin_bottom(24);
+        clamp.set_margin_start(24);
+        clamp.set_margin_end(24);
+
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        clamp.set_child(Some(&container));
+        scrolled.set_child(Some(&clamp));
+
+        let toolbar_view = adw::ToolbarView::new();
+        let header = adw::HeaderBar::new();
+        toolbar_view.add_top_bar(&header);
+        toolbar_view.set_content(Some(&scrolled));
+
+        let title = format!("Books by {}", author_name);
+        let nav_page = adw::NavigationPage::builder()
+            .title(&title)
+            .child(&toolbar_view)
+            .build();
+        nav_view.push(&nav_page);
+
+        let loading = adw::StatusPage::new();
+        let spinner = adw::Spinner::new();
+        spinner.set_size_request(48, 48);
+        loading.set_child(Some(&spinner));
+        loading.set_title("Loading");
+        container.append(&loading);
+
+        if let Some(id) = author_id {
+            let client = imp.client.clone();
+            let win = self.clone();
+            let id_owned = id.to_string();
+            let name_owned = author_name.to_string();
+            let container_clone = container.clone();
+            let loading_clone = loading.clone();
+            glib::spawn_future_local(async move {
+                let (tx, rx) = async_channel::bounded(1);
+                std::thread::spawn(move || {
+                    let result = client.get_author_with_items(&id_owned);
+                    let _ = tx.send_blocking(result);
+                });
+                match rx.recv().await {
+                    Ok(Ok(author)) => {
+                        let items = author.library_items.unwrap_or_default();
+                        win.populate_author_books(&container_clone, &loading_clone, &items, &name_owned);
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("Fetch author items failed: {}, falling back to local filter", e);
+                        let items = win.filter_library_items_by_author_name(&name_owned);
+                        win.populate_author_books(&container_clone, &loading_clone, &items, &name_owned);
+                    }
+                    Err(_) => {}
+                }
+            });
+        } else {
+            let items = self.filter_library_items_by_author_name(author_name);
+            self.populate_author_books(&container, &loading, &items, author_name);
         }
-        *imp.library_search_query.borrow_mut() = author_name.to_string();
-        if let Some(entry) = imp.library_search_entry.borrow().as_ref() {
-            entry.set_text(author_name);
+    }
+
+    fn filter_library_items_by_author_name(&self, author_name: &str) -> Vec<LibraryItem> {
+        let needle = author_name.to_lowercase();
+        self.imp()
+            .library_items
+            .borrow()
+            .iter()
+            .filter(|item| {
+                let md = item.media.as_ref().and_then(|m| m.metadata.as_ref());
+                let an = md
+                    .and_then(|m| m.author_name.as_deref())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let lf = md
+                    .and_then(|m| m.author_name_lf.as_deref())
+                    .unwrap_or("")
+                    .to_lowercase();
+                an.contains(&needle) || lf.contains(&needle)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn populate_author_books(
+        &self,
+        container: &gtk::Box,
+        loading: &adw::StatusPage,
+        items: &[LibraryItem],
+        author_name: &str,
+    ) {
+        container.remove(loading);
+
+        if items.is_empty() {
+            let empty = adw::StatusPage::new();
+            empty.set_icon_name(Some("user-info-symbolic"));
+            empty.set_title("No books found");
+            empty.set_description(Some(&format!(
+                "No books by {} in your library",
+                author_name
+            )));
+            container.append(&empty);
+            return;
         }
-        self.render_library();
-        self.render_continue_listening();
+
+        let count_label =
+            gtk::Label::new(Some(&format!("{} book(s) by {}", items.len(), author_name)));
+        count_label.add_css_class("dim-label");
+        count_label.add_css_class("caption");
+        count_label.set_halign(gtk::Align::Start);
+        container.append(&count_label);
+
+        let flowbox = gtk::FlowBox::new();
+        flowbox.set_selection_mode(gtk::SelectionMode::None);
+        flowbox.set_homogeneous(true);
+        flowbox.set_max_children_per_line(6);
+        flowbox.set_min_children_per_line(2);
+        flowbox.set_column_spacing(12);
+        flowbox.set_row_spacing(12);
+        for item in items {
+            let card = self.create_book_card(item);
+            flowbox.append(&card);
+        }
+        container.append(&flowbox);
     }
 
     fn refresh_chapter_indicators(&self, current_time: f64) {
@@ -2580,9 +2704,10 @@ the session may expire and require signing in again"
                     btn.add_css_class("author-chip");
                     btn.set_tooltip_text(Some(&format!("Show books by {}", author.name)));
                     let name = author.name.clone();
+                    let id = author.id.clone();
                     let win = self.clone();
                     btn.connect_clicked(move |_| {
-                        win.filter_library_by_author(&name);
+                        win.show_author_books(id.as_deref(), &name);
                     });
                     authors_flow.append(&btn);
                 }

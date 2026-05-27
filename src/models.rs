@@ -218,6 +218,14 @@ pub struct Author {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct AuthorExpanded {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    #[serde(rename = "libraryItems")]
+    pub library_items: Option<Vec<LibraryItem>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct SeriesItem {
     pub id: Option<String>,
     pub name: Option<String>,

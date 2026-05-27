@@ -359,6 +359,11 @@ impl AudiobookshelfClient {
         self.get("/api/me")
     }
 
+    /// GET /api/authors/:id?include=items — fetches an author with their library items
+    pub fn get_author_with_items(&self, author_id: &str) -> Result<AuthorExpanded, ApiError> {
+        self.get(&format!("/api/authors/{}?include=items", author_id))
+    }
+
     /// Returns the current user's bookmarks filtered by libraryItemId, sorted by time.
     pub fn get_bookmarks_for_item(&self, item_id: &str) -> Result<Vec<Bookmark>, ApiError> {
         let user = self.get_me()?;
