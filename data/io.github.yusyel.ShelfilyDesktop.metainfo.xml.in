@@ -36,6 +36,19 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="2.0.0" date="2026-05-27">
+      <description>
+        <p>Major update with a full-screen Now Playing experience and desktop integration.</p>
+        <ul>
+          <li>Now Playing screen with cover-derived ambient background, 30s skips, speed control, sleep timer, bookmarks, and a chapter list with chapter-relative progress</li>
+          <li>MPRIS media controls: media keys, GNOME panel and lock-screen controls with cover art</li>
+          <li>Bookmarks with editable notes and a dedicated Bookmarks tab grouped by book</li>
+          <li>Dark mode selectable from Preferences</li>
+          <li>Markdown/HTML book descriptions, author book listings, and a Recently Played sort</li>
+          <li>Smoother window resizing and several playback/seek fixes</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.19" date="2026-03-23"/>
   </releases>
 </component>

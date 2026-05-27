@@ -2518,7 +2518,9 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         if !imp.sleep_until_chapter_end.get() {
             return;
         }
-        for (start, end, _, _) in imp.chapter_indicators.borrow().iter() {
+        // Use the playing item's chapters (always populated), not the detail
+        // page's chapter rows which may belong to a different/closed item.
+        for (start, end) in imp.current_chapters.borrow().iter() {
             if current_time >= *start && current_time < *end {
                 if (end - current_time) <= 1.0 {
                     self.cancel_sleep_timer();
@@ -2795,17 +2797,15 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         // from bouncing back to the previous chapter for a tick or two).
         imp.seek_settle_target.set(seconds);
         imp.seek_settle_ticks.set(5);
+        // Bottom player bar scale is absolute (full book).
         imp.updating_slider.set(true);
         imp.position_scale.set_value(seconds);
-        if let Some(scale) = imp.now_playing_position_scale.borrow().as_ref() {
-            scale.set_value(seconds);
-        }
         imp.updating_slider.set(false);
         imp.position_label.set_text(&format_time(seconds));
-        if let Some(label) = imp.now_playing_position_label.borrow().as_ref() {
-            label.set_text(&format_time(seconds));
-        }
         self.refresh_chapter_indicators(seconds);
+        // Now Playing scale/labels are chapter-relative — let the dedicated
+        // refresh compute them instead of writing absolute seconds here.
+        self.refresh_now_playing_info();
         self.update_mpris_position(seconds);
 
         // Report the new position to the Audiobookshelf server immediately so the
@@ -3897,50 +3897,29 @@ the session may expire and require signing in again"
         let cover_overlay = gtk::Overlay::new();
         cover_overlay.set_child(Some(&cover_box));
 
-        // Progress overlay at bottom of cover (track + fill row)
+        // Progress overlay at bottom of cover — a DrawingArea only repaints on
+        // resize/invalidation, unlike a tick callback which would run every
+        // frame forever for every card.
         if progress_val > 0.0 || is_finished {
-            log::debug!(
-                "Book {} progress: {:.2}% finished={}",
-                item.id,
-                progress_val * 100.0,
-                is_finished
-            );
             let frac = if is_finished { 1.0 } else { progress_val.clamp(0.0, 1.0) };
-
-            let track = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            track.add_css_class("cover-progress-track");
-            track.set_height_request(8);
-            track.set_size_request(-1, 8);
-            track.set_hexpand(true);
-            track.set_valign(gtk::Align::End);
-            track.set_halign(gtk::Align::Fill);
-
-            let fill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            fill.add_css_class("cover-progress-fill");
-            fill.set_size_request(1, 8);
-            track.append(&fill);
-
-            let remainder = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            remainder.set_hexpand(true);
-            track.append(&remainder);
-
-            let frac_f = frac as f32;
-            let fill_tick = fill.clone();
-            let remainder_tick = remainder.clone();
-            track.add_tick_callback(move |widget, _| {
-                let width = widget.width();
-                if width > 0 {
-                    let fw = (width as f32 * frac_f).round() as i32;
-                    let fw = fw.max(1);
-                    if fill_tick.width_request() != fw {
-                        fill_tick.set_size_request(fw, 8);
-                        remainder_tick.set_size_request((width - fw).max(0), 8);
-                    }
-                }
-                glib::ControlFlow::Continue
+            let progress = gtk::DrawingArea::new();
+            progress.set_height_request(8);
+            progress.set_hexpand(true);
+            progress.set_valign(gtk::Align::End);
+            progress.set_halign(gtk::Align::Fill);
+            progress.set_draw_func(move |_, cr, width, height| {
+                let w = width as f64;
+                let h = height as f64;
+                // Translucent track for contrast over any cover
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                cr.rectangle(0.0, 0.0, w, h);
+                let _ = cr.fill();
+                // Accent fill
+                cr.set_source_rgba(0.21, 0.56, 1.0, 1.0);
+                cr.rectangle(0.0, 0.0, w * frac, h);
+                let _ = cr.fill();
             });
-
-            cover_overlay.add_overlay(&track);
+            cover_overlay.add_overlay(&progress);
         }
 
         let hover_play = gtk::Button::from_icon_name("media-playback-start-symbolic");
