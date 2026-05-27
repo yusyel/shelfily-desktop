@@ -530,6 +530,18 @@ impl AudiobookshelfClient {
         format!("{base}{separator}token={token}")
     }
 
+    /// Public cover URL (token-authenticated) for use as MPRIS art etc.
+    pub fn cover_url(&self, item_id: &str) -> String {
+        let inner = self.inner.lock().unwrap();
+        let token = inner.access_token.as_deref().unwrap_or("");
+        let base = format!("{}/api/items/{}/cover?width=400", inner.base_url, item_id);
+        if token.is_empty() {
+            base
+        } else {
+            format!("{base}&token={token}")
+        }
+    }
+
     /// Generic GET request
     fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         self.execute_json(path, |client, url, access_token| {

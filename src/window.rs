@@ -64,6 +64,7 @@ mod imp {
         pub library_id: RefCell<String>,
         pub continue_flowbox: RefCell<Option<gtk::FlowBox>>,
         pub library_switcher_bar: RefCell<Option<adw::ViewSwitcherBar>>,
+        pub library_header_switcher: RefCell<Option<adw::ViewSwitcher>>,
         pub library_items: RefCell<Vec<LibraryItem>>,
         pub continue_items: RefCell<Vec<LibraryItem>>,
         pub library_sort_mode: Cell<LibrarySortMode>,
@@ -102,6 +103,8 @@ mod imp {
         pub seek_settle_target: Cell<f64>,
         pub seek_settle_ticks: Cell<u8>,
         pub np_current_chapter_start: Cell<f64>,
+        pub current_chapters: RefCell<Vec<(f64, f64)>>,
+        pub mpris: RefCell<Option<Rc<mpris_server::Player>>>,
         pub sleep_timer_source: RefCell<Option<glib::SourceId>>,
         pub sleep_until_chapter_end: Rc<Cell<bool>>,
         pub sleep_remaining_secs: Rc<Cell<i64>>,
@@ -128,6 +131,7 @@ mod imp {
         // OAuth
         pub oauth_consumed: RefCell<bool>,
         pub compact_mode: Cell<bool>,
+        pub last_layout_width: Cell<i32>,
         pub toast_overlay: adw::ToastOverlay,
         pub nav_view: RefCell<Option<adw::NavigationView>>,
     }
@@ -152,6 +156,7 @@ mod imp {
                 library_id: RefCell::new(String::new()),
                 continue_flowbox: RefCell::new(None),
                 library_switcher_bar: RefCell::new(None),
+                library_header_switcher: RefCell::new(None),
                 library_items: RefCell::new(Vec::new()),
                 continue_items: RefCell::new(Vec::new()),
                 library_sort_mode: Cell::new(LibrarySortMode::NewlyAdded),
@@ -188,6 +193,8 @@ mod imp {
                 seek_settle_target: Cell::new(-1.0),
                 seek_settle_ticks: Cell::new(0),
                 np_current_chapter_start: Cell::new(0.0),
+                current_chapters: RefCell::new(Vec::new()),
+                mpris: RefCell::new(None),
                 sleep_timer_source: RefCell::new(None),
                 sleep_until_chapter_end: Rc::new(Cell::new(false)),
                 sleep_remaining_secs: Rc::new(Cell::new(0)),
@@ -211,6 +218,7 @@ mod imp {
                 progress_source: RefCell::new(None),
                 oauth_consumed: RefCell::new(false),
                 compact_mode: Cell::new(false),
+                last_layout_width: Cell::new(-1),
                 toast_overlay: adw::ToastOverlay::new(),
                 nav_view: RefCell::new(None),
             }
@@ -513,6 +521,12 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
 
         // Try auto-login from saved credentials
         self.try_restore_session();
+
+        // Set up MPRIS (media keys, GNOME panel/lock-screen controls)
+        let win = self.clone();
+        glib::spawn_future_local(async move {
+            win.setup_mpris().await;
+        });
     }
 
     fn has_saved_session_candidate(&self) -> bool {
@@ -666,23 +680,26 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
     fn install_resize_observer(&self) {
         let win = self.clone();
         self.add_tick_callback(move |widget, _| {
-            win.apply_responsive_layout(widget.width());
+            let width = widget.width();
+            // Only re-layout when the width actually changes — running the full
+            // responsive pass every frame thrashes the layout while resizing.
+            if width > 0 && width != win.imp().last_layout_width.get() {
+                win.imp().last_layout_width.set(width);
+                win.apply_responsive_layout(width);
+            }
             glib::ControlFlow::Continue
         });
     }
 
-    fn resize_flowbox(flowbox: &gtk::FlowBox, width: i32) {
-        let (min_cols, max_cols, spacing, card_width) = if width < 680 {
-            (1, 2, 10, 126)
-        } else if width < 980 {
-            (2, 4, 12, 142)
-        } else {
-            (2, 6, 16, 160)
-        };
-        flowbox.set_min_children_per_line(min_cols);
-        flowbox.set_max_children_per_line(max_cols);
-        flowbox.set_column_spacing(spacing);
-        flowbox.set_row_spacing(spacing);
+    fn resize_flowbox(flowbox: &gtk::FlowBox, width: i32, card_width: i32, spacing: i32) {
+        // Compute how many fixed-width cards fit so columns reflow smoothly
+        // instead of jumping between hard-coded breakpoints.
+        let usable = (width - 32).max(card_width);
+        let cols = ((usable + spacing) / (card_width + spacing)).clamp(1, 8);
+        flowbox.set_min_children_per_line(1);
+        flowbox.set_max_children_per_line(cols as u32);
+        flowbox.set_column_spacing(spacing as u32);
+        flowbox.set_row_spacing(spacing as u32);
 
         let mut child_opt = flowbox.first_child();
         while let Some(child) = child_opt {
@@ -696,16 +713,22 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
     fn apply_responsive_layout(&self, width: i32) {
         let compact = width < 820;
         let imp = self.imp();
-        if imp.compact_mode.get() == compact {
-            if let Some(flowbox) = imp.library_flowbox.borrow().as_ref() {
-                Self::resize_flowbox(flowbox, width);
-            }
-            if let Some(flowbox) = imp.continue_flowbox.borrow().as_ref() {
-                Self::resize_flowbox(flowbox, width);
-            }
-            return;
+
+        // Constant card width keeps cards from resizing as the window scales;
+        // only the column count changes, so the grid reflows cleanly.
+        let (card_width, spacing) = if compact { (140, 12) } else { (160, 16) };
+
+        if let Some(flowbox) = imp.library_flowbox.borrow().as_ref() {
+            Self::resize_flowbox(flowbox, width, card_width, spacing);
+        }
+        if let Some(flowbox) = imp.continue_flowbox.borrow().as_ref() {
+            Self::resize_flowbox(flowbox, width, card_width, spacing);
         }
 
+        // The rest only needs to change when the compact breakpoint flips.
+        if imp.compact_mode.get() == compact {
+            return;
+        }
         imp.compact_mode.set(compact);
         if compact {
             self.add_css_class("compact");
@@ -713,14 +736,13 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             self.remove_css_class("compact");
         }
 
-        if let Some(flowbox) = imp.library_flowbox.borrow().as_ref() {
-            Self::resize_flowbox(flowbox, width);
-        }
-        if let Some(flowbox) = imp.continue_flowbox.borrow().as_ref() {
-            Self::resize_flowbox(flowbox, width);
-        }
         if let Some(switcher_bar) = imp.library_switcher_bar.borrow().as_ref() {
             switcher_bar.set_reveal(compact);
+        }
+        // Hide the wide header switcher when compact so it doesn't crowd the
+        // header buttons — the bottom switcher bar takes over instead.
+        if let Some(header_switcher) = imp.library_header_switcher.borrow().as_ref() {
+            header_switcher.set_visible(!compact);
         }
 
         if let Some(top_box) = imp.detail_top_box.borrow().as_ref() {
@@ -1299,9 +1321,9 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 Ok(Ok(_)) => {
                     let toast = adw::Toast::new("Bookmark added");
                     win.imp().toast_overlay.add_toast(toast);
+                    win.load_all_bookmarks();
                     if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
                         win.load_bookmarks(&target_item_id);
-                        win.load_all_bookmarks();
                     }
                 }
                 Ok(Err(err)) => {
@@ -1336,9 +1358,11 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 Ok(Ok(())) => {
                     let toast = adw::Toast::new("Bookmark updated");
                     win.imp().toast_overlay.add_toast(toast);
+                    // Always refresh the global Bookmarks tab; refresh the detail
+                    // list only when it currently shows this item.
+                    win.load_all_bookmarks();
                     if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
                         win.load_bookmarks(&target_item_id);
-                        win.load_all_bookmarks();
                     }
                 }
                 Ok(Err(err)) => {
@@ -1372,9 +1396,9 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 Ok(Ok(())) => {
                     let toast = adw::Toast::new("Bookmark removed");
                     win.imp().toast_overlay.add_toast(toast);
+                    win.load_all_bookmarks();
                     if detail_item_id.as_deref() == Some(target_item_id.as_str()) {
                         win.load_bookmarks(&target_item_id);
-                        win.load_all_bookmarks();
                     }
                 }
                 Ok(Err(err)) => {
@@ -1746,6 +1770,177 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 self.update_play_pause_icon(true);
                 self.refresh_detail_play_button();
             }
+            self.update_mpris_status();
+        }
+    }
+
+    // ─── MPRIS (desktop media controls) ─────────────────────────────────────
+
+    async fn setup_mpris(&self) {
+        use mpris_server::Player;
+
+        let player = match Player::builder("io.github.yusyel.ShelfilyDesktop")
+            .identity("Shelfily Desktop")
+            .can_play(true)
+            .can_pause(true)
+            .can_go_next(true)
+            .can_go_previous(true)
+            .can_seek(true)
+            .can_control(true)
+            .build()
+            .await
+        {
+            Ok(p) => Rc::new(p),
+            Err(e) => {
+                log::warn!("MPRIS unavailable: {}", e);
+                return;
+            }
+        };
+
+        let win = self.downgrade();
+        player.connect_play_pause(move |_| {
+            if let Some(w) = win.upgrade() {
+                w.toggle_play_pause();
+            }
+        });
+        let win = self.downgrade();
+        player.connect_play(move |_| {
+            if let Some(w) = win.upgrade() {
+                if !w.imp().is_playing.get() {
+                    w.toggle_play_pause();
+                }
+            }
+        });
+        let win = self.downgrade();
+        player.connect_pause(move |_| {
+            if let Some(w) = win.upgrade() {
+                if w.imp().is_playing.get() {
+                    w.toggle_play_pause();
+                }
+            }
+        });
+        let win = self.downgrade();
+        player.connect_stop(move |_| {
+            if let Some(w) = win.upgrade() {
+                w.stop_playback();
+                w.hide_player();
+                w.refresh_detail_play_button();
+            }
+        });
+        let win = self.downgrade();
+        player.connect_next(move |_| {
+            if let Some(w) = win.upgrade() {
+                w.mpris_skip_chapter(1);
+            }
+        });
+        let win = self.downgrade();
+        player.connect_previous(move |_| {
+            if let Some(w) = win.upgrade() {
+                w.mpris_skip_chapter(-1);
+            }
+        });
+        let win = self.downgrade();
+        player.connect_seek(move |_, offset| {
+            if let Some(w) = win.upgrade() {
+                let cur = *w.imp().current_time.borrow();
+                let delta = offset.as_secs() as f64;
+                w.seek_to((cur + delta).max(0.0));
+            }
+        });
+        let win = self.downgrade();
+        player.connect_set_position(move |_, _track, position| {
+            if let Some(w) = win.upgrade() {
+                w.seek_to((position.as_secs() as f64).max(0.0));
+            }
+        });
+
+        let run_player = player.clone();
+        glib::spawn_future_local(async move {
+            run_player.run().await;
+        });
+
+        *self.imp().mpris.borrow_mut() = Some(player);
+    }
+
+    fn mpris_skip_chapter(&self, direction: i32) {
+        let imp = self.imp();
+        let cur = *imp.current_time.borrow();
+        let chapters = imp.current_chapters.borrow();
+        if chapters.is_empty() {
+            drop(chapters);
+            self.seek_relative((direction as i64) * 30);
+            return;
+        }
+        // Find current chapter index
+        let idx = chapters
+            .iter()
+            .position(|(start, end)| cur >= *start && cur < *end);
+        let target = match idx {
+            Some(i) => {
+                if direction > 0 {
+                    chapters.get(i + 1).map(|(s, _)| *s)
+                } else if cur - chapters[i].0 > 3.0 {
+                    // More than 3s into chapter: previous restarts current
+                    Some(chapters[i].0)
+                } else if i > 0 {
+                    Some(chapters[i - 1].0)
+                } else {
+                    Some(0.0)
+                }
+            }
+            None => None,
+        };
+        drop(chapters);
+        if let Some(t) = target {
+            self.seek_to(t + 0.25);
+        }
+    }
+
+    fn update_mpris_status(&self) {
+        use mpris_server::PlaybackStatus;
+        let imp = self.imp();
+        let player = match imp.mpris.borrow().clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let status = if imp.pipeline.borrow().is_none() {
+            PlaybackStatus::Stopped
+        } else if imp.is_playing.get() {
+            PlaybackStatus::Playing
+        } else {
+            PlaybackStatus::Paused
+        };
+        let rate = imp.current_speed.get();
+        glib::spawn_future_local(async move {
+            let _ = player.set_playback_status(status).await;
+            let _ = player.set_rate(rate).await;
+        });
+    }
+
+    fn update_mpris_metadata(&self, title: &str, author: &str, item_id: &str, duration: f64) {
+        use mpris_server::Metadata;
+        let imp = self.imp();
+        let player = match imp.mpris.borrow().clone() {
+            Some(p) => p,
+            None => return,
+        };
+        let art_url = imp.client.cover_url(item_id);
+        let mut builder = Metadata::builder()
+            .title(title)
+            .artist([author.to_string()])
+            .art_url(art_url);
+        if duration > 0.0 {
+            builder = builder.length(mpris_server::Time::from_micros((duration * 1e6) as i64));
+        }
+        let metadata = builder.build();
+        glib::spawn_future_local(async move {
+            let _ = player.set_metadata(metadata).await;
+        });
+    }
+
+    fn update_mpris_position(&self, seconds: f64) {
+        if let Some(player) = self.imp().mpris.borrow().as_ref() {
+            player.set_position(mpris_server::Time::from_micros((seconds * 1e6) as i64));
         }
     }
 
@@ -2611,6 +2806,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             label.set_text(&format_time(seconds));
         }
         self.refresh_chapter_indicators(seconds);
+        self.update_mpris_position(seconds);
 
         // Report the new position to the Audiobookshelf server immediately so the
         // session progress is authoritative, not just the local seek.
@@ -3352,6 +3548,7 @@ the session may expire and require signing in again"
         *self.imp().library_content_stack.borrow_mut() = Some(content_stack);
         *self.imp().continue_flowbox.borrow_mut() = Some(continue_flowbox);
         *self.imp().library_switcher_bar.borrow_mut() = Some(switcher_bar);
+        *self.imp().library_header_switcher.borrow_mut() = Some(switcher);
 
         toolbar_view.upcast()
     }
@@ -3494,6 +3691,9 @@ the session may expire and require signing in again"
             let card = self.create_book_card(item);
             flowbox.append(&card);
         }
+        // Size the freshly added cards for the current width.
+        let (card_width, spacing) = if imp.compact_mode.get() { (140, 12) } else { (160, 16) };
+        Self::resize_flowbox(flowbox, self.width().max(1), card_width, spacing);
     }
 
     fn item_title_for_sort(item: &LibraryItem) -> &str {
@@ -3657,6 +3857,10 @@ the session may expire and require signing in again"
             status.set_description(Some("Start listening to a book to see it here"));
             status.set_vexpand(true);
             continue_flowbox.append(&status);
+        } else {
+            let (card_width, spacing) =
+                if imp.compact_mode.get() { (140, 12) } else { (160, 16) };
+            Self::resize_flowbox(continue_flowbox, self.width().max(1), card_width, spacing);
         }
     }
 
@@ -4455,10 +4659,31 @@ the session may expire and require signing in again"
                         }
                     });
 
+                    // Store chapters for MPRIS next/previous navigation
+                    let chapters: Vec<(f64, f64)> = session
+                        .chapters
+                        .as_ref()
+                        .map(|cs| {
+                            cs.iter()
+                                .map(|c| (c.start.unwrap_or(0.0), c.end.unwrap_or(0.0)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    *win.imp().current_chapters.borrow_mut() = chapters;
+
                     win.reveal_player();
                     win.play_audio(&session, session_current);
                     win.start_progress_timer();
                     win.start_sync_timer();
+
+                    // Publish to MPRIS
+                    win.update_mpris_metadata(
+                        session.display_title.as_deref().unwrap_or("Unknown Book"),
+                        session.display_author.as_deref().unwrap_or(""),
+                        &id,
+                        session_duration,
+                    );
+                    win.update_mpris_status();
                 }
                 Ok(Err(e)) => {
                     log::error!("Failed to start playback: {}", e);
@@ -4502,8 +4727,10 @@ the session may expire and require signing in again"
         *imp.pipeline.borrow_mut() = None;
         imp.is_playing.set(false);
         *imp.current_item_id.borrow_mut() = None;
+        imp.current_chapters.borrow_mut().clear();
         self.update_play_pause_icon(false);
         self.refresh_detail_play_button();
+        self.update_mpris_status();
     }
 
     fn play_audio(&self, session: &PlaybackSession, start_position: f64) {
@@ -4683,6 +4910,7 @@ the session may expire and require signing in again"
                         *imp.current_time.borrow_mut() = secs;
                         win.refresh_chapter_indicators(secs);
                         win.refresh_now_playing_info();
+                        win.update_mpris_position(secs);
                         win.check_chapter_end_sleep(secs);
                     }
                 }
