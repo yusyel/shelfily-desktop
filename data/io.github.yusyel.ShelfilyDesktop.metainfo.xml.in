@@ -36,6 +36,20 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="2.1.0" date="2026-05-28">
+      <description>
+        <p>UI polish and quality-of-life improvements.</p>
+        <ul>
+          <li>Rounded cover artwork throughout the app</li>
+          <li>Progress badge on book covers and proper empty/no-results states</li>
+          <li>Keyboard shortcuts (Space, arrows, Ctrl+B, Ctrl+F) with a shortcuts window</li>
+          <li>Search moved to a search bar and now also filters the Bookmarks tab</li>
+          <li>"30" labels on the skip buttons and chapter markers on the seek bar</li>
+          <li>Skeleton loading placeholders and smoother, breakpoint-based resizing</li>
+          <li>Mini-player cover keeps the cover aspect ratio</li>
+        </ul>
+      </description>
+    </release>
     <release version="2.0.0" date="2026-05-27">
       <description>
         <p>Major update with a full-screen Now Playing experience and desktop integration.</p>

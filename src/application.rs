@@ -88,12 +88,52 @@ impl ShelfilyDesktopApplication {
         let preferences_action = gio::ActionEntry::builder("preferences")
             .activate(move |app: &Self, _, _| app.show_preferences())
             .build();
+        let shortcuts_action = gio::ActionEntry::builder("shortcuts")
+            .activate(move |app: &Self, _, _| app.show_shortcuts())
+            .build();
         self.add_action_entries([
             quit_action,
             about_action,
             logout_action,
             preferences_action,
+            shortcuts_action,
         ]);
+        self.set_accels_for_action("app.shortcuts", &["<primary>question"]);
+    }
+
+    fn show_shortcuts(&self) {
+        let window = self.active_window();
+
+        let dialog = adw::PreferencesDialog::new();
+        dialog.set_title("Keyboard Shortcuts");
+
+        let page = adw::PreferencesPage::new();
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Playback");
+
+        let rows: &[(&str, &str)] = &[
+            ("Play / Pause", "Space"),
+            ("Back 30 seconds", "←"),
+            ("Forward 30 seconds", "→"),
+            ("Add bookmark", "Ctrl+B"),
+            ("Search", "Ctrl+F"),
+            ("Preferences", "Ctrl+,"),
+            ("Keyboard shortcuts", "Ctrl+?"),
+            ("Quit", "Ctrl+Q"),
+        ];
+        for (action, keys) in rows {
+            let row = adw::ActionRow::new();
+            row.set_title(action);
+            let kb = gtk::Label::new(Some(keys));
+            kb.add_css_class("dim-label");
+            kb.add_css_class("monospace");
+            kb.set_valign(gtk::Align::Center);
+            row.add_suffix(&kb);
+            group.add(&row);
+        }
+        page.add(&group);
+        dialog.add(&page);
+        dialog.present(window.as_ref());
     }
 
     fn show_preferences(&self) {

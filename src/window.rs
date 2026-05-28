@@ -63,6 +63,8 @@ mod imp {
         pub library_content_stack: RefCell<Option<gtk::Stack>>,
         pub library_id: RefCell<String>,
         pub continue_flowbox: RefCell<Option<gtk::FlowBox>>,
+        pub continue_stack: RefCell<Option<gtk::Stack>>,
+        pub library_stack: RefCell<Option<gtk::Stack>>,
         pub library_switcher_bar: RefCell<Option<adw::ViewSwitcherBar>>,
         pub library_header_switcher: RefCell<Option<adw::ViewSwitcher>>,
         pub library_items: RefCell<Vec<LibraryItem>>,
@@ -83,6 +85,7 @@ mod imp {
         pub bookmarks_group: RefCell<Option<adw::PreferencesGroup>>,
         pub bookmarks_section: RefCell<Option<gtk::Box>>,
         pub library_search_entry: RefCell<Option<gtk::SearchEntry>>,
+        pub library_search_bar: RefCell<Option<gtk::SearchBar>>,
         pub all_bookmarks: RefCell<Vec<Bookmark>>,
         pub bookmarks_list_box: RefCell<Option<gtk::Box>>,
         pub bookmarks_tab_empty: RefCell<Option<adw::StatusPage>>,
@@ -131,7 +134,6 @@ mod imp {
         // OAuth
         pub oauth_consumed: RefCell<bool>,
         pub compact_mode: Cell<bool>,
-        pub last_layout_width: Cell<i32>,
         pub toast_overlay: adw::ToastOverlay,
         pub nav_view: RefCell<Option<adw::NavigationView>>,
     }
@@ -155,6 +157,8 @@ mod imp {
                 library_content_stack: RefCell::new(None),
                 library_id: RefCell::new(String::new()),
                 continue_flowbox: RefCell::new(None),
+                continue_stack: RefCell::new(None),
+                library_stack: RefCell::new(None),
                 library_switcher_bar: RefCell::new(None),
                 library_header_switcher: RefCell::new(None),
                 library_items: RefCell::new(Vec::new()),
@@ -174,6 +178,7 @@ mod imp {
                 bookmarks_group: RefCell::new(None),
                 bookmarks_section: RefCell::new(None),
                 library_search_entry: RefCell::new(None),
+                library_search_bar: RefCell::new(None),
                 all_bookmarks: RefCell::new(Vec::new()),
                 bookmarks_list_box: RefCell::new(None),
                 bookmarks_tab_empty: RefCell::new(None),
@@ -218,7 +223,6 @@ mod imp {
                 progress_source: RefCell::new(None),
                 oauth_consumed: RefCell::new(false),
                 compact_mode: Cell::new(false),
-                last_layout_width: Cell::new(-1),
                 toast_overlay: adw::ToastOverlay::new(),
                 nav_view: RefCell::new(None),
             }
@@ -517,7 +521,8 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
 
         imp.toast_overlay.set_child(Some(&main_box));
         self.set_content(Some(&imp.toast_overlay));
-        self.install_resize_observer();
+        self.install_breakpoint();
+        self.install_shortcuts();
 
         // Try auto-login from saved credentials
         self.try_restore_session();
@@ -565,8 +570,30 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 border-color: @accent_color;
             }
             .book-cover-frame { border-radius: 10px; }
+            @keyframes skeleton-pulse {
+                0% { opacity: 0.35; }
+                50% { opacity: 0.7; }
+                100% { opacity: 0.35; }
+            }
+            .skeleton {
+                background-color: alpha(@window_fg_color, 0.18);
+                animation: skeleton-pulse 1.4s ease-in-out infinite;
+            }
+            .skeleton-cover { border-radius: 10px; }
+            .skeleton-line { border-radius: 6px; margin-top: 4px; }
             .cover-play-btn {
                 transition: opacity 200ms ease;
+            }
+            .cover-badge {
+                font-size: 0.72em;
+                font-weight: bold;
+                color: white;
+                background-color: alpha(black, 0.6);
+                border-radius: 999px;
+                padding: 1px 7px;
+            }
+            .cover-badge-done {
+                background-color: @success_color;
             }
             .cover-progress-track {
                 background-color: alpha(black, 0.55);
@@ -610,6 +637,11 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             }
             .np-skip-btn:hover {
                 background: alpha(@window_fg_color, 0.16);
+            }
+            .np-skip-label {
+                font-size: 0.65em;
+                font-weight: bold;
+                opacity: 0.9;
             }
             .np-scale trough {
                 min-height: 4px;
@@ -677,58 +709,59 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         );
     }
 
-    fn install_resize_observer(&self) {
+    fn install_shortcuts(&self) {
+        // Bubble phase so a focused text entry / button still gets the key
+        // first (e.g. typing a space in search), and these only fire otherwise.
+        let controller = gtk::ShortcutController::new();
+        controller.set_propagation_phase(gtk::PropagationPhase::Bubble);
+
+        let shortcuts: &[(&str, fn(&Self))] = &[
+            ("space", |w| w.toggle_play_pause()),
+            ("Left", |w| w.seek_relative(-30)),
+            ("Right", |w| w.seek_relative(30)),
+            ("<Control>b", |w| w.add_bookmark_at_current_position()),
+            ("<Control>f", |w| {
+                if let Some(bar) = w.imp().library_search_bar.borrow().as_ref() {
+                    bar.set_search_mode(!bar.is_search_mode());
+                }
+            }),
+        ];
+
+        for (trigger, handler) in shortcuts {
+            let Some(t) = gtk::ShortcutTrigger::parse_string(trigger) else {
+                continue;
+            };
+            let win = self.clone();
+            let handler = *handler;
+            let action = gtk::CallbackAction::new(move |_, _| {
+                handler(&win);
+                glib::Propagation::Stop
+            });
+            controller.add_shortcut(gtk::Shortcut::new(Some(t), Some(action)));
+        }
+
+        self.add_controller(controller);
+    }
+
+    fn install_breakpoint(&self) {
+        // Declarative responsive handling: AdwBreakpoint fires apply/unapply at
+        // the 820px threshold. The FlowBoxes reflow their columns on their own
+        // (fixed card width + max-children-per-line), so no per-frame tick.
+        let condition = adw::BreakpointCondition::new_length(
+            adw::BreakpointConditionLengthType::MaxWidth,
+            820.0,
+            adw::LengthUnit::Px,
+        );
+        let breakpoint = adw::Breakpoint::new(condition);
         let win = self.clone();
-        self.add_tick_callback(move |widget, _| {
-            let width = widget.width();
-            // Only re-layout when the width actually changes — running the full
-            // responsive pass every frame thrashes the layout while resizing.
-            if width > 0 && width != win.imp().last_layout_width.get() {
-                win.imp().last_layout_width.set(width);
-                win.apply_responsive_layout(width);
-            }
-            glib::ControlFlow::Continue
-        });
+        breakpoint.connect_apply(move |_| win.set_compact_layout(true));
+        let win = self.clone();
+        breakpoint.connect_unapply(move |_| win.set_compact_layout(false));
+        self.add_breakpoint(breakpoint);
     }
 
-    fn resize_flowbox(flowbox: &gtk::FlowBox, width: i32, card_width: i32, spacing: i32) {
-        // Compute how many fixed-width cards fit so columns reflow smoothly
-        // instead of jumping between hard-coded breakpoints.
-        let usable = (width - 32).max(card_width);
-        let cols = ((usable + spacing) / (card_width + spacing)).clamp(1, 8);
-        flowbox.set_min_children_per_line(1);
-        flowbox.set_max_children_per_line(cols as u32);
-        flowbox.set_column_spacing(spacing as u32);
-        flowbox.set_row_spacing(spacing as u32);
-
-        let mut child_opt = flowbox.first_child();
-        while let Some(child) = child_opt {
-            if let Some(inner) = child.first_child() {
-                inner.set_width_request(card_width);
-            }
-            child_opt = child.next_sibling();
-        }
-    }
-
-    fn apply_responsive_layout(&self, width: i32) {
-        let compact = width < 820;
+    fn set_compact_layout(&self, compact: bool) {
         let imp = self.imp();
-
-        // Constant card width keeps cards from resizing as the window scales;
-        // only the column count changes, so the grid reflows cleanly.
-        let (card_width, spacing) = if compact { (140, 12) } else { (160, 16) };
-
-        if let Some(flowbox) = imp.library_flowbox.borrow().as_ref() {
-            Self::resize_flowbox(flowbox, width, card_width, spacing);
-        }
-        if let Some(flowbox) = imp.continue_flowbox.borrow().as_ref() {
-            Self::resize_flowbox(flowbox, width, card_width, spacing);
-        }
-
-        // The rest only needs to change when the compact breakpoint flips.
-        if imp.compact_mode.get() == compact {
-            return;
-        }
         imp.compact_mode.set(compact);
         if compact {
             self.add_css_class("compact");
@@ -879,10 +912,13 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         let imp = self.imp();
         imp.player_bar.add_css_class("player-bar");
 
-        // Cover image (small)
+        // Cover image (small): a 48px box, aspect ratio preserved. Portrait
+        // audiobook covers render centered (no forced 1:1 square block).
         imp.player_cover.set_pixel_size(48);
-        imp.player_cover.set_size_request(48, 48);
-        imp.player_cover.add_css_class("card");
+        imp.player_cover.set_valign(gtk::Align::Center);
+        imp.player_cover.set_halign(gtk::Align::Center);
+        imp.player_cover.add_css_class("book-cover-frame");
+        imp.player_cover.set_overflow(gtk::Overflow::Hidden);
 
         // Info column
         imp.player_title
@@ -1202,7 +1238,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         flowbox.set_selection_mode(gtk::SelectionMode::None);
         flowbox.set_homogeneous(true);
         flowbox.set_max_children_per_line(6);
-        flowbox.set_min_children_per_line(2);
+        flowbox.set_min_children_per_line(1);
         flowbox.set_column_spacing(12);
         flowbox.set_row_spacing(12);
         for item in items {
@@ -1460,16 +1496,6 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             .and_then(|p| p.parent())
             .and_then(|w| w.downcast::<gtk::Stack>().ok());
 
-        if bookmarks.is_empty() {
-            if let Some(s) = stack {
-                s.set_visible_child_name("empty");
-            }
-            return;
-        }
-        if let Some(s) = stack {
-            s.set_visible_child_name("content");
-        }
-
         // Index library items by id for quick lookups
         let items_by_id: HashMap<String, LibraryItem> = imp
             .library_items
@@ -1478,7 +1504,19 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             .map(|item| (item.id.clone(), item.clone()))
             .collect();
 
-        // Group bookmarks by library item id, preserving first-seen order
+        let query = imp.library_search_query.borrow().trim().to_lowercase();
+        let book_title_for = |id: &str| -> String {
+            items_by_id
+                .get(id)
+                .and_then(|i| i.media.as_ref())
+                .and_then(|m| m.metadata.as_ref())
+                .and_then(|md| md.title.as_deref())
+                .unwrap_or("Unknown book")
+                .to_string()
+        };
+
+        // Group bookmarks by library item id, preserving first-seen order,
+        // filtering by the search query (book title or bookmark note).
         let mut ordered_ids: Vec<String> = Vec::new();
         let mut grouped: HashMap<String, Vec<Bookmark>> = HashMap::new();
         for bm in bookmarks.iter() {
@@ -1486,10 +1524,42 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
                 Some(id) => id.clone(),
                 None => continue,
             };
+            if !query.is_empty() {
+                let title_match = book_title_for(&id).to_lowercase().contains(&query);
+                let note_match = bm
+                    .title
+                    .as_deref()
+                    .map(|t| t.to_lowercase().contains(&query))
+                    .unwrap_or(false);
+                if !title_match && !note_match {
+                    continue;
+                }
+            }
             if !grouped.contains_key(&id) {
                 ordered_ids.push(id.clone());
             }
             grouped.entry(id).or_default().push(bm.clone());
+        }
+
+        if ordered_ids.is_empty() {
+            if let Some(empty) = empty_page.as_ref() {
+                if query.is_empty() {
+                    empty.set_title("No bookmarks yet");
+                    empty.set_description(Some(
+                        "Use the bookmark button in the player bar to save positions",
+                    ));
+                } else {
+                    empty.set_title("No Results");
+                    empty.set_description(Some("No bookmarks match your search"));
+                }
+            }
+            if let Some(s) = stack {
+                s.set_visible_child_name("empty");
+            }
+            return;
+        }
+        if let Some(s) = stack {
+            s.set_visible_child_name("content");
         }
 
         for id in &ordered_ids {
@@ -1509,6 +1579,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             let cover_frame = gtk::Frame::new(None);
             cover_frame.add_css_class("book-cover-frame");
             cover_frame.set_size_request(56, 56);
+            cover_frame.set_overflow(gtk::Overflow::Hidden);
             let cover_image = gtk::Image::from_icon_name("audio-x-generic-symbolic");
             cover_image.set_pixel_size(56);
             cover_image.set_size_request(56, 56);
@@ -1978,6 +2049,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         let cover_frame = gtk::Frame::new(None);
         cover_frame.add_css_class("now-playing-cover");
         cover_frame.set_halign(gtk::Align::Center);
+        cover_frame.set_overflow(gtk::Overflow::Hidden);
         let cover_image = gtk::Image::from_icon_name("audio-x-generic-symbolic");
         cover_image.set_pixel_size(320);
         cover_image.set_size_request(320, 320);
@@ -2048,13 +2120,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         let main_controls = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         main_controls.set_halign(gtk::Align::Center);
 
-        let back_btn = gtk::Button::from_icon_name("media-seek-backward-symbolic");
-        back_btn.add_css_class("circular");
-        back_btn.add_css_class("np-skip-btn");
-        back_btn.set_size_request(56, 56);
-        back_btn.set_tooltip_text(Some("Back 30 seconds"));
-        let win = self.clone();
-        back_btn.connect_clicked(move |_| win.seek_relative(-30));
+        let back_btn = self.build_skip_button("media-seek-backward-symbolic", -30);
         main_controls.append(&back_btn);
 
         let play_btn = gtk::Button::from_icon_name("media-playback-start-symbolic");
@@ -2066,13 +2132,7 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         play_btn.connect_clicked(move |_| win.toggle_play_pause());
         main_controls.append(&play_btn);
 
-        let fwd_btn = gtk::Button::from_icon_name("media-seek-forward-symbolic");
-        fwd_btn.add_css_class("circular");
-        fwd_btn.add_css_class("np-skip-btn");
-        fwd_btn.set_size_request(56, 56);
-        fwd_btn.set_tooltip_text(Some("Forward 30 seconds"));
-        let win = self.clone();
-        fwd_btn.connect_clicked(move |_| win.seek_relative(30));
+        let fwd_btn = self.build_skip_button("media-seek-forward-symbolic", 30);
         main_controls.append(&fwd_btn);
 
         column.append(&main_controls);
@@ -2360,6 +2420,38 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
         }
         *self.imp().now_playing_bg_provider.borrow_mut() = Some(p.clone());
         p
+    }
+
+    fn build_skip_button(&self, icon: &str, secs: i64) -> gtk::Button {
+        let btn = gtk::Button::new();
+        btn.add_css_class("circular");
+        btn.add_css_class("np-skip-btn");
+        btn.set_size_request(56, 56);
+        btn.set_tooltip_text(Some(&format!(
+            "{} {} seconds",
+            if secs < 0 { "Back" } else { "Forward" },
+            secs.abs()
+        )));
+
+        let overlay = gtk::Overlay::new();
+        let icon_img = gtk::Image::from_icon_name(icon);
+        icon_img.set_pixel_size(20);
+        icon_img.set_valign(gtk::Align::Start);
+        icon_img.set_margin_top(10);
+        overlay.set_child(Some(&icon_img));
+
+        let label = gtk::Label::new(Some(&secs.abs().to_string()));
+        label.add_css_class("np-skip-label");
+        label.set_halign(gtk::Align::Center);
+        label.set_valign(gtk::Align::End);
+        label.set_margin_bottom(8);
+        overlay.add_overlay(&label);
+
+        btn.set_child(Some(&overlay));
+
+        let win = self.clone();
+        btn.connect_clicked(move |_| win.seek_relative(secs));
+        btn
     }
 
     fn build_speed_menu_button(&self) -> gtk::MenuButton {
@@ -2727,23 +2819,27 @@ If this is a Flatpak build, ensure org.freedesktop.secrets is allowed. Original 
             db
         );
 
-        let css = format!(
-            ".now-playing-bg {{ \
-                background-image: linear-gradient(to bottom, #{r:02x}{g:02x}{b:02x} 0%, @window_bg_color 75%); \
-                background-color: #{r:02x}{g:02x}{b:02x}; \
-            }} \
-            .now-playing-header {{ \
-                background-color: #{r:02x}{g:02x}{b:02x}; \
-                box-shadow: none; \
-            }} \
-            .now-playing-header > windowhandle {{ background-color: transparent; }}",
-            r = dr,
-            g = dg,
-            b = db
-        );
+        // Single source of ambient CSS so calls don't clobber each other.
+        self.apply_ambient_color(dr, dg, db);
+    }
 
-        let provider = self.ensure_ambient_provider();
-        provider.load_from_string(&css);
+    fn update_seek_marks(&self) {
+        let imp = self.imp();
+        imp.position_scale.clear_marks();
+        let dur = *imp.duration.borrow();
+        if dur <= 0.0 {
+            return;
+        }
+        let chapters = imp.current_chapters.borrow();
+        // Avoid clutter for books with a huge number of chapters.
+        if chapters.len() > 1 && chapters.len() <= 80 {
+            for (start, _) in chapters.iter() {
+                if *start > 0.0 && *start < dur {
+                    imp.position_scale
+                        .add_mark(*start, gtk::PositionType::Bottom, None);
+                }
+            }
+        }
     }
 
     fn seek_relative(&self, delta_secs: i64) {
@@ -3373,30 +3469,46 @@ the session may expire and require signing in again"
         sort_popover.set_child(Some(&sort_box));
         sort_btn.set_popover(Some(&sort_popover));
 
-        let search_btn = gtk::MenuButton::new();
+        // Search: a toggle button in the header that reveals a SearchBar below.
+        let search_btn = gtk::ToggleButton::new();
         search_btn.set_icon_name("system-search-symbolic");
-        search_btn.set_tooltip_text(Some("Search in All Books"));
+        search_btn.set_tooltip_text(Some("Search (Ctrl+F)"));
         search_btn.add_css_class("flat");
 
-        let search_popover = gtk::Popover::new();
-        let search_popover_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        search_popover_box.set_margin_top(8);
-        search_popover_box.set_margin_bottom(8);
-        search_popover_box.set_margin_start(8);
-        search_popover_box.set_margin_end(8);
         let search_entry = gtk::SearchEntry::new();
-        search_entry.set_placeholder_text(Some("Search books or authors"));
+        search_entry.set_placeholder_text(Some("Search books, authors, bookmarks"));
         search_entry.set_hexpand(true);
         let win = self.clone();
         search_entry.connect_search_changed(move |entry| {
             *win.imp().library_search_query.borrow_mut() = entry.text().to_string();
             win.render_library();
             win.render_continue_listening();
+            win.render_bookmarks_tab();
         });
         *self.imp().library_search_entry.borrow_mut() = Some(search_entry.clone());
-        search_popover_box.append(&search_entry);
-        search_popover.set_child(Some(&search_popover_box));
-        search_btn.set_popover(Some(&search_popover));
+
+        let search_bar = gtk::SearchBar::new();
+        search_bar.set_child(Some(&search_entry));
+        search_bar.connect_entry(&search_entry);
+        search_bar.set_key_capture_widget(Some(self));
+        search_btn
+            .bind_property("active", &search_bar, "search-mode-enabled")
+            .bidirectional()
+            .sync_create()
+            .build();
+        // Clear the query when the search bar is closed.
+        let win = self.clone();
+        let entry_clear = search_entry.clone();
+        search_bar.connect_search_mode_enabled_notify(move |bar| {
+            if !bar.is_search_mode() {
+                entry_clear.set_text("");
+                *win.imp().library_search_query.borrow_mut() = String::new();
+                win.render_library();
+                win.render_continue_listening();
+                win.render_bookmarks_tab();
+            }
+        });
+        *self.imp().library_search_bar.borrow_mut() = Some(search_bar.clone());
 
         let menu_button = gtk::MenuButton::new();
         menu_button.set_primary(true);
@@ -3405,6 +3517,7 @@ the session may expire and require signing in again"
 
         let menu = gio::Menu::new();
         menu.append(Some("Preferences"), Some("app.preferences"));
+        menu.append(Some("Keyboard Shortcuts"), Some("app.shortcuts"));
         menu.append(Some("About"), Some("app.about"));
         menu.append(Some("Log Out"), Some("app.logout"));
         menu.append(Some("Quit"), Some("app.quit"));
@@ -3434,13 +3547,27 @@ the session may expire and require signing in again"
         let continue_flowbox = gtk::FlowBox::new();
         continue_flowbox.set_valign(gtk::Align::Start);
         continue_flowbox.set_max_children_per_line(6);
-        continue_flowbox.set_min_children_per_line(2);
+        continue_flowbox.set_min_children_per_line(1);
         continue_flowbox.set_column_spacing(16);
         continue_flowbox.set_row_spacing(16);
         continue_flowbox.set_homogeneous(true);
         continue_flowbox.set_selection_mode(gtk::SelectionMode::None);
 
-        continue_clamp.set_child(Some(&continue_flowbox));
+        // Stack so the empty state renders as a proper centered page instead of
+        // a cramped grid cell inside the flowbox.
+        let continue_stack = gtk::Stack::new();
+        continue_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+
+        let continue_empty = adw::StatusPage::new();
+        continue_empty.set_icon_name(Some("audio-headphones-symbolic"));
+        continue_empty.set_title("No Books in Progress");
+        continue_empty.set_description(Some("Start listening to a book to see it here"));
+
+        continue_stack.add_named(&continue_flowbox, Some("content"));
+        continue_stack.add_named(&continue_empty, Some("empty"));
+        continue_stack.set_visible_child_name("empty");
+
+        continue_clamp.set_child(Some(&continue_stack));
         continue_scrolled.set_child(Some(&continue_clamp));
 
         let continue_page = view_stack.add_titled(&continue_scrolled, Some("continue"), "Continue");
@@ -3463,14 +3590,25 @@ the session may expire and require signing in again"
         let flowbox = gtk::FlowBox::new();
         flowbox.set_valign(gtk::Align::Start);
         flowbox.set_max_children_per_line(6);
-        flowbox.set_min_children_per_line(2);
+        flowbox.set_min_children_per_line(1);
         flowbox.set_column_spacing(16);
         flowbox.set_row_spacing(16);
         flowbox.set_homogeneous(true);
         flowbox.set_selection_mode(gtk::SelectionMode::None);
 
         all_books_box.append(&flowbox);
-        library_clamp.set_child(Some(&all_books_box));
+
+        let library_stack = gtk::Stack::new();
+        library_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+        let library_empty = adw::StatusPage::new();
+        library_empty.set_icon_name(Some("system-search-symbolic"));
+        library_empty.set_title("No Books Found");
+        library_empty.set_description(Some("No books match your search"));
+        library_stack.add_named(&all_books_box, Some("content"));
+        library_stack.add_named(&library_empty, Some("empty"));
+        library_stack.set_visible_child_name("content");
+
+        library_clamp.set_child(Some(&library_stack));
         library_scrolled.set_child(Some(&library_clamp));
 
         let library_page = view_stack.add_titled(&library_scrolled, Some("all"), "All Books");
@@ -3527,18 +3665,46 @@ the session may expire and require signing in again"
         switcher_bar.set_reveal(false);
 
         toolbar_view.add_top_bar(&header);
+        toolbar_view.add_top_bar(&search_bar);
         toolbar_view.add_bottom_bar(&switcher_bar);
 
-        // Loading overlay
-        let loading_status = adw::StatusPage::new();
-        loading_status.set_title("Loading Books");
-        loading_status.set_description(Some("Fetching your library..."));
-        let loading_spinner = adw::Spinner::new();
-        loading_spinner.set_size_request(32, 32);
-        loading_status.set_child(Some(&loading_spinner));
+        // Skeleton loading: placeholder cards while the library loads.
+        let skeleton_scrolled = gtk::ScrolledWindow::new();
+        skeleton_scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+        let skeleton_clamp = adw::Clamp::new();
+        skeleton_clamp.set_maximum_size(1200);
+        skeleton_clamp.set_margin_top(16);
+        skeleton_clamp.set_margin_bottom(16);
+        skeleton_clamp.set_margin_start(16);
+        skeleton_clamp.set_margin_end(16);
+        let skeleton_flow = gtk::FlowBox::new();
+        skeleton_flow.set_valign(gtk::Align::Start);
+        skeleton_flow.set_max_children_per_line(6);
+        skeleton_flow.set_min_children_per_line(1);
+        skeleton_flow.set_column_spacing(16);
+        skeleton_flow.set_row_spacing(16);
+        skeleton_flow.set_homogeneous(true);
+        skeleton_flow.set_selection_mode(gtk::SelectionMode::None);
+        for _ in 0..12 {
+            let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
+            card.set_width_request(160);
+            let cover = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            cover.set_size_request(160, 160);
+            cover.add_css_class("skeleton");
+            cover.add_css_class("skeleton-cover");
+            let line = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            line.set_size_request(120, 14);
+            line.add_css_class("skeleton");
+            line.add_css_class("skeleton-line");
+            card.append(&cover);
+            card.append(&line);
+            skeleton_flow.append(&card);
+        }
+        skeleton_clamp.set_child(Some(&skeleton_flow));
+        skeleton_scrolled.set_child(Some(&skeleton_clamp));
 
         let content_stack = gtk::Stack::new();
-        content_stack.add_named(&loading_status, Some("loading"));
+        content_stack.add_named(&skeleton_scrolled, Some("loading"));
         content_stack.add_named(&view_stack, Some("content"));
         content_stack.set_visible_child_name("loading");
 
@@ -3547,6 +3713,8 @@ the session may expire and require signing in again"
         *self.imp().library_flowbox.borrow_mut() = Some(flowbox);
         *self.imp().library_content_stack.borrow_mut() = Some(content_stack);
         *self.imp().continue_flowbox.borrow_mut() = Some(continue_flowbox);
+        *self.imp().continue_stack.borrow_mut() = Some(continue_stack);
+        *self.imp().library_stack.borrow_mut() = Some(library_stack);
         *self.imp().library_switcher_bar.borrow_mut() = Some(switcher_bar);
         *self.imp().library_header_switcher.borrow_mut() = Some(switcher);
 
@@ -3691,9 +3859,24 @@ the session may expire and require signing in again"
             let card = self.create_book_card(item);
             flowbox.append(&card);
         }
-        // Size the freshly added cards for the current width.
-        let (card_width, spacing) = if imp.compact_mode.get() { (140, 12) } else { (160, 16) };
-        Self::resize_flowbox(flowbox, self.width().max(1), card_width, spacing);
+
+        // Show empty state when there are no matching books.
+        if let Some(stack) = imp.library_stack.borrow().as_ref() {
+            let has_query = !imp.library_search_query.borrow().trim().is_empty();
+            if let Some(empty) = stack
+                .child_by_name("empty")
+                .and_downcast::<adw::StatusPage>()
+            {
+                if has_query {
+                    empty.set_title("No Results");
+                    empty.set_description(Some("No books match your search"));
+                } else {
+                    empty.set_title("No Books");
+                    empty.set_description(Some("This library has no books yet"));
+                }
+            }
+            stack.set_visible_child_name(if items.is_empty() { "empty" } else { "content" });
+        }
     }
 
     fn item_title_for_sort(item: &LibraryItem) -> &str {
@@ -3850,17 +4033,8 @@ the session may expire and require signing in again"
             continue_flowbox.append(&card);
         }
 
-        if items.is_empty() {
-            let status = adw::StatusPage::new();
-            status.set_icon_name(Some("audio-headphones-symbolic"));
-            status.set_title("No Books in Progress");
-            status.set_description(Some("Start listening to a book to see it here"));
-            status.set_vexpand(true);
-            continue_flowbox.append(&status);
-        } else {
-            let (card_width, spacing) =
-                if imp.compact_mode.get() { (140, 12) } else { (160, 16) };
-            Self::resize_flowbox(continue_flowbox, self.width().max(1), card_width, spacing);
+        if let Some(stack) = imp.continue_stack.borrow().as_ref() {
+            stack.set_visible_child_name(if items.is_empty() { "empty" } else { "content" });
         }
     }
 
@@ -3874,6 +4048,8 @@ the session may expire and require signing in again"
         cover_frame.set_halign(gtk::Align::Center);
         cover_frame.add_css_class("card");
         cover_frame.add_css_class("book-cover-frame");
+        // Clip children (cover image + progress overlay) to the rounded corners.
+        cover_frame.set_overflow(gtk::Overflow::Hidden);
 
         let cover_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let cover_image = gtk::Image::from_icon_name("audio-x-generic-symbolic");
@@ -3920,6 +4096,21 @@ the session may expire and require signing in again"
                 let _ = cr.fill();
             });
             cover_overlay.add_overlay(&progress);
+
+            // Small badge at top-right: checkmark when finished, else percent.
+            let badge = gtk::Label::new(None);
+            badge.add_css_class("cover-badge");
+            badge.set_halign(gtk::Align::End);
+            badge.set_valign(gtk::Align::Start);
+            badge.set_margin_top(6);
+            badge.set_margin_end(6);
+            if is_finished {
+                badge.set_text("\u{2713}"); // ✓
+                badge.add_css_class("cover-badge-done");
+            } else {
+                badge.set_text(&format!("{}%", (frac * 100.0).round() as i32));
+            }
+            cover_overlay.add_overlay(&badge);
         }
 
         let hover_play = gtk::Button::from_icon_name("media-playback-start-symbolic");
@@ -4140,6 +4331,9 @@ the session may expire and require signing in again"
 
         let cover_frame = gtk::Frame::new(None);
         cover_frame.add_css_class("card");
+        cover_frame.add_css_class("book-cover-frame");
+        cover_frame.set_valign(gtk::Align::Start);
+        cover_frame.set_overflow(gtk::Overflow::Hidden);
         let cover_image = gtk::Image::from_icon_name("audio-x-generic-symbolic");
         cover_image.set_pixel_size(220);
         cover_image.set_size_request(220, 220);
@@ -4277,7 +4471,8 @@ the session may expire and require signing in again"
 
         top_box.append(&info_box);
         detail_box.append(&top_box);
-        self.apply_responsive_layout(self.width());
+        // Apply the current compact state to the freshly built detail widgets.
+        self.set_compact_layout(self.imp().compact_mode.get());
 
         // Play button (Gelly tarzı dairesel büyük buton)
         let play_button = gtk::Button::from_icon_name("media-playback-start-symbolic");
@@ -4649,6 +4844,7 @@ the session may expire and require signing in again"
                         })
                         .unwrap_or_default();
                     *win.imp().current_chapters.borrow_mut() = chapters;
+                    win.update_seek_marks();
 
                     win.reveal_player();
                     win.play_audio(&session, session_current);
@@ -4707,6 +4903,7 @@ the session may expire and require signing in again"
         imp.is_playing.set(false);
         *imp.current_item_id.borrow_mut() = None;
         imp.current_chapters.borrow_mut().clear();
+        imp.position_scale.clear_marks();
         self.update_play_pause_icon(false);
         self.refresh_detail_play_button();
         self.update_mpris_status();
